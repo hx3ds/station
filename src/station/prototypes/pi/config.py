@@ -1,0 +1,145 @@
+import os
+import shlex
+import shutil
+from dataclasses import dataclass
+from pathlib import Path
+
+from station.config.config import mapping_get
+from station.prototypes.launch_settings import (
+    collect_provider_env,
+    env_str,
+    merge_launch_settings,
+    parse_command_args,
+    split_provider_model,
+)
+
+PI_ROOT = Path(__file__).resolve().parents[5] / "pi"
+PI_CODING_AGENT = PI_ROOT / "packages" / "coding-agent"
+
+def _resolve_pi_command(pi_section):
+    explicit = mapping_get(pi_section, "command", (str, list), None, allow_none=True)
+    if explicit is None or explicit == "" or explicit == []:
+        env_cmd = env_str("PI_BRIDGE_PI_COMMAND")
+        if env_cmd:
+            return shlex.split(env_cmd)
+    else:
+        parsed = parse_command_args(explicit, "pi.command")
+        if parsed:
+            return parsed
+
+    tsx = PI_ROOT / "node_modules" / ".bin" / "tsx"
+    cli_ts = PI_CODING_AGENT / "src" / "cli.ts"
+    if tsx.exists() and cli_ts.exists():
+        return [
+            str(tsx),
+            "--tsconfig",
+            str(PI_ROOT / "tsconfig.json"),
+            str(cli_ts),
+        ]
+
+    for rel in ("dist/bundle/cli.js", "dist/cli.js"):
+        candidate = PI_CODING_AGENT / rel
+        if candidate.exists():
+            return ["node", str(candidate)]
+
+    pi_test = PI_ROOT / "pi-test.sh"
+    if pi_test.exists():
+        return ["bash", str(pi_test)]
+
+    installed = shutil.which("pi")
+    if installed:
+        return [installed]
+
+    raise RuntimeError(
+        "Pi binary not found. Build the pi monorepo, install the pi CLI, "
+        "or set pi.command / PI_BRIDGE_PI_COMMAND."
+    )
+
+@dataclass(slots=True)
+class PiLaunchSettings:
+    command: list
+    command_cwd: Path
+    workspace_dir: str
+    session_root: Path
+    agent_home: Path
+    model: str
+    provider: str
+    thinking_level: str
+    extra_env: dict
+    rpc_args: list
+    no_session: bool
+
+    @classmethod
+    def from_model_settings(
+        cls,
+        model_settings,
+        *,
+        default_workspace,
+        default_session_root,
+        default_agent_home,
+        config_file=None,
+    ):
+        raw = merge_launch_settings(model_settings or {}, config_file=config_file)
+
+        pi_section = mapping_get(raw, "pi", (dict,), {})
+        model = mapping_get(raw, "model", (dict,), {})
+        workspace = mapping_get(raw, "workspace", (dict,), {})
+        keys = mapping_get(raw, "keys", (dict,), {})
+        env_section = mapping_get(raw, "env", (dict,), {})
+
+        workspace_dir = (
+            mapping_get(workspace, "dir", (str,), "").strip()
+            or env_str("PI_BRIDGE_WORKSPACE")
+            or default_workspace
+        )
+        workspace_path = Path(workspace_dir).expanduser()
+
+        session_root = Path(
+            mapping_get(pi_section, "session_root", (str,), "").strip()
+            or env_str("PI_BRIDGE_SESSION_ROOT")
+            or default_session_root
+        ).expanduser()
+        agent_home = Path(
+            mapping_get(pi_section, "home", (str,), "").strip()
+            or env_str("PI_BRIDGE_AGENT_HOME")
+            or default_agent_home
+        ).expanduser()
+
+        provider, model_id = split_provider_model(
+            mapping_get(model, "model", (str,), "").strip(),
+            mapping_get(model, "provider", (str,), "").strip(),
+        )
+
+        rpc_args = parse_command_args(
+            mapping_get(pi_section, "rpc_args", (str, list), None, allow_none=True),
+            "pi.rpc_args",
+        )
+        if not rpc_args:
+            raw_args = env_str("PI_BRIDGE_RPC_ARGS")
+            if raw_args:
+                rpc_args = shlex.split(raw_args)
+
+        no_session = mapping_get(pi_section, "no_session", (bool,), False)
+        if env_str("PI_BRIDGE_NO_SESSION").lower() in {"1", "true", "yes"}:
+            no_session = True
+
+        if workspace_path.is_dir():
+            command_cwd = workspace_path
+        elif PI_ROOT.exists():
+            command_cwd = PI_ROOT
+        else:
+            command_cwd = Path.cwd()
+
+        return cls(
+            command=_resolve_pi_command(pi_section),
+            command_cwd=command_cwd,
+            workspace_dir=str(workspace_path),
+            session_root=session_root,
+            agent_home=agent_home,
+            model=model_id,
+            provider=provider,
+            thinking_level=mapping_get(model, "thinking_level", (str,), "").strip(),
+            extra_env=collect_provider_env(keys, env_section),
+            rpc_args=rpc_args,
+            no_session=no_session,
+        )

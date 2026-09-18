@@ -1,0 +1,11 @@
+aiohttp[speedups]
+uvloop
+aiortc
+cryptography
+asyncpg
+mautrix[encryption]
+discord.py
+PyNaCl
+tantivy
+transformers
+audioop-lts; python_version >= "3.13"

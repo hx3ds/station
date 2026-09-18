@@ -1,0 +1,18 @@
+{
+  "name": "station-whatsapp-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "pair": "node pair.js",
+    "serve": "node serve.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "WhiskeySockets/Baileys#01047debd81beb20da7b7779b08edcb06aa03770",
+    "pino": "^9.0.0",
+    "@hapi/boom": "^10.0.1"
+  },
+  "overrides": {
+    "protobufjs": "^7.5.5"
+  }
+}
