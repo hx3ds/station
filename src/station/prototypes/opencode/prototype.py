@@ -1,4 +1,3 @@
-import json
 import os
 
 from station import logger
@@ -6,7 +5,7 @@ from station.prototypes.gateway_lifecycle import PrototypeGateway
 from station.prototypes.prototype import Prototype
 
 from .attachments import OpenCodeAttachments
-from .auth_flow import OauthLoginState, OpenCodeAuthFlow
+from .auth_flow import OpenCodeAuthFlow
 from .config import OpenCodeLaunchSettings, load_workspace_override, write_local_llm_opencode_config
 from .server_client import OpenCodeServerProcess
 from .worker import OpenCodeWorker
@@ -24,14 +23,14 @@ class OpenCodePrototype(OpenCodeAuthFlow, OpenCodeWorkspace, OpenCodeWorker, Ope
         )
         self._init_gateway_lifecycle()
         self._init_bridge_worker(worker_name="opencode-worker")
-        self._oauth_login = OauthLoginState()
+        self._init_device_auth()
         self._applied_provider_auth = ""
 
     def _gateway_label(self):
         return "OpenCode"
 
     async def _before_teardown_gateway(self):
-        await self._cancel_oauth_login()
+        await self._cancel_device_auth()
 
     def _clear_gateway_state(self):
         self._applied_provider_auth = ""
@@ -171,23 +170,4 @@ class OpenCodePrototype(OpenCodeAuthFlow, OpenCodeWorkspace, OpenCodeWorker, Ope
             acct_id=ctx.acct_id,
             platform=ctx.platform,
             chat_type=ctx.chat_type,
-        )
-
-    async def handle_event(self, data, model_id, model_settings, chat_id=None, acct_id=None, request_id=None, event_level=None):
-        logger.info(
-            "OpenCodePrototype event level=%s model_id=%s acct_id=%s chat_id=%s payload=%s",
-            event_level,
-            model_id,
-            acct_id,
-            chat_id,
-            json.dumps(data, ensure_ascii=True)[:1000],
-        )
-        await super().handle_event(
-            data,
-            model_id,
-            model_settings,
-            chat_id=chat_id,
-            acct_id=acct_id,
-            request_id=request_id,
-            event_level=event_level,
         )

@@ -1,6 +1,5 @@
 import asyncio
 
-from station import logger
 from station.prototypes.prototype import Prototype
 
 from .auth_flow import GrokAuthFlow
@@ -19,8 +18,7 @@ class GrokPrototype(GrokAuthFlow, GrokVoiceBridge, GrokTurn, Prototype):
             secret_file=secret_file,
         )
         self._active_chat_requests = set()
-        self._auth_states = {}
-        self._auth_states_guard = asyncio.Lock()
+        self._init_device_auth()
         self._realtime_by_call = {}
         self._realtime_by_chat = {}
         self._realtime_guard = asyncio.Lock()
@@ -89,22 +87,4 @@ class GrokPrototype(GrokAuthFlow, GrokVoiceBridge, GrokTurn, Prototype):
             reply_to=ctx.reply_to,
             platform=ctx.platform,
             chat_type=ctx.chat_type,
-        )
-
-    async def handle_event(self, data, model_id, model_settings, chat_id=None, acct_id=None, request_id=None, event_level=None):
-        logger.info(
-            "Grok event level=%s model_id=%s acct_id=%s chat_id=%s",
-            event_level,
-            model_id,
-            acct_id,
-            chat_id,
-        )
-        await super().handle_event(
-            data,
-            model_id,
-            model_settings,
-            chat_id=chat_id,
-            acct_id=acct_id,
-            request_id=request_id,
-            event_level=event_level,
         )

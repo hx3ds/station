@@ -1,4 +1,3 @@
-import os
 import shlex
 import shutil
 from dataclasses import dataclass
@@ -8,6 +7,8 @@ from station.config.config import mapping_get
 from station.prototypes.launch_settings import (
     collect_provider_env,
     env_str,
+    first_existing_command,
+    launch_sections,
     merge_launch_settings,
     parse_command_args,
     split_provider_model,
@@ -29,26 +30,19 @@ def _resolve_pi_command(pi_section):
 
     tsx = PI_ROOT / "node_modules" / ".bin" / "tsx"
     cli_ts = PI_CODING_AGENT / "src" / "cli.ts"
-    if tsx.exists() and cli_ts.exists():
-        return [
-            str(tsx),
-            "--tsconfig",
-            str(PI_ROOT / "tsconfig.json"),
-            str(cli_ts),
+    node = shutil.which("node")
+    bash = shutil.which("bash")
+    found = first_existing_command(
+        [
+            [str(tsx), "--tsconfig", str(PI_ROOT / "tsconfig.json"), str(cli_ts)] if tsx.exists() and cli_ts.exists() else None,
+            [node, str(PI_CODING_AGENT / "dist/bundle/cli.js")] if node and (PI_CODING_AGENT / "dist/bundle/cli.js").exists() else None,
+            [node, str(PI_CODING_AGENT / "dist/cli.js")] if node and (PI_CODING_AGENT / "dist/cli.js").exists() else None,
+            [bash, str(PI_ROOT / "pi-test.sh")] if bash and (PI_ROOT / "pi-test.sh").exists() else None,
+            shutil.which("pi"),
         ]
-
-    for rel in ("dist/bundle/cli.js", "dist/cli.js"):
-        candidate = PI_CODING_AGENT / rel
-        if candidate.exists():
-            return ["node", str(candidate)]
-
-    pi_test = PI_ROOT / "pi-test.sh"
-    if pi_test.exists():
-        return ["bash", str(pi_test)]
-
-    installed = shutil.which("pi")
-    if installed:
-        return [installed]
+    )
+    if found:
+        return found
 
     raise RuntimeError(
         "Pi binary not found. Build the pi monorepo, install the pi CLI, "
@@ -81,11 +75,12 @@ class PiLaunchSettings:
     ):
         raw = merge_launch_settings(model_settings or {}, config_file=config_file)
 
-        pi_section = mapping_get(raw, "pi", (dict,), {})
-        model = mapping_get(raw, "model", (dict,), {})
-        workspace = mapping_get(raw, "workspace", (dict,), {})
-        keys = mapping_get(raw, "keys", (dict,), {})
-        env_section = mapping_get(raw, "env", (dict,), {})
+        sections = launch_sections(raw, "pi", "model", "workspace", "keys", "env")
+        pi_section = sections["pi"]
+        model = sections["model"]
+        workspace = sections["workspace"]
+        keys = sections["keys"]
+        env_section = sections["env"]
 
         workspace_dir = (
             mapping_get(workspace, "dir", (str,), "").strip()

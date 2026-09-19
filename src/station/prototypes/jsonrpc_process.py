@@ -116,3 +116,16 @@ class JsonLineRpcProcess:
         except json.JSONDecodeError:
             logger.warning("%s malformed JSON: %s", label, text[:500])
             return None
+
+    async def _pump_stdout(self, *, label, on_frame, buffered=True, on_close=None):
+        async def on_line(raw):
+            frame = self._parse_json_line(raw, label=label)
+            if frame is None:
+                return
+            await on_frame(frame)
+
+        await self._read_stdout_lines(on_line=on_line, buffered=buffered)
+        if on_close is not None:
+            on_close()
+            return
+        self._fail_pending("%s stdout closed" % label)

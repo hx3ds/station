@@ -53,20 +53,21 @@ class OpenCodeWorker(PrototypeBridgeWorker):
                 )
 
     async def _pop_batched_turn(self, *, state):
-        messages = await self._pop_pending_messages(state=state)
-        if not messages:
-            return None
-        if len(messages) == 1:
-            return list(messages[0].parts)
+        def merge_many(messages):
+            merged = []
+            for index, message in enumerate(messages, start=1):
+                for item in message.parts:
+                    copied = dict(item)
+                    if copied.get("type") == "text":
+                        copied["text"] = self._queued_followup_label(index, copied["text"]).strip()
+                    merged.append(copied)
+            return merged
 
-        merged = []
-        for index, message in enumerate(messages, start=1):
-            for item in message.parts:
-                copied = dict(item)
-                if copied.get("type") == "text":
-                    copied["text"] = self._queued_followup_label(index, copied["text"]).strip()
-                merged.append(copied)
-        return merged
+        return await self._pop_batched_items(
+            state=state,
+            merge_one=lambda message: list(message.parts),
+            merge_many=merge_many,
+        )
 
     async def _drain_session_events(self, *, gateway, state):
         if not state.session_id:

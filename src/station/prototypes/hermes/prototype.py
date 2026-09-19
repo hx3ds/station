@@ -6,15 +6,13 @@ from station.config.config import merge_nested
 from station.prototypes.gateway_lifecycle import PrototypeGateway
 from station.prototypes.prototype import Prototype
 
-from .attachments import HermesAttachments
 from .auth_flow import HermesAuthFlow
-from .config import HermesLaunchSettings
+from .config import HermesLaunchSettings, hermes_home_path
 from .gateway_client import HermesGatewayProcess
-from .slash import HermesSlash
-from .voice import HermesVoice
 from .worker import HermesWorker
 
-class HermesPrototype(HermesAuthFlow, HermesAttachments, HermesVoice, HermesSlash, HermesWorker, PrototypeGateway, Prototype):
+
+class HermesPrototype(HermesAuthFlow, HermesWorker, PrototypeGateway, Prototype):
     def __init__(self, app, prototype_id, model_id, model_settings=None, *, config_file=None, secret_file=None):
         super().__init__(
             app,
@@ -58,7 +56,8 @@ class HermesPrototype(HermesAuthFlow, HermesAttachments, HermesVoice, HermesSlas
                 "(OpenAI-compatible, ending in /v1)"
             )
 
-        hermes_home = Path(self.storage_dir).resolve() / "hermes_home"
+        hermes_home = hermes_home_path(self.storage_dir)
+        await self._prepare_hermes_home(hermes_home=hermes_home, settings=settings)
         self._write_hermes_config(hermes_home=hermes_home, settings=settings)
         if settings.uses_local_llm():
             logger.info(
@@ -82,8 +81,10 @@ class HermesPrototype(HermesAuthFlow, HermesAttachments, HermesVoice, HermesSlas
         )
         return gateway
 
-    def _write_hermes_config(self, *, hermes_home, settings):
-        hermes_home.mkdir(parents=True, exist_ok=True)
+    async def _prepare_hermes_home(self, *, hermes_home, settings):
+        return
+
+    def _hermes_config_payload(self, settings):
         hermes_approvals = settings.approvals_mode or "off"
         if hermes_approvals == "always":
             hermes_approvals = "off"
@@ -93,22 +94,20 @@ class HermesPrototype(HermesAuthFlow, HermesAttachments, HermesVoice, HermesSlas
         }
         model_cfg = {}
         provider = settings.gateway_provider()
+        model_name = settings.model
         if provider:
             model_cfg["provider"] = provider
-        if settings.model:
-            model_cfg["default"] = settings.model
+        if model_name:
+            model_cfg["default"] = model_name
         if settings.uses_local_llm():
             if settings.local_llm_base_url:
                 model_cfg["base_url"] = settings.local_llm_base_url
             if settings.local_llm_api_key:
                 model_cfg["api_key"] = settings.local_llm_api_key
-            # Hermes agent_init floors context at 64k; a 32k report refuses to start.
             model_cfg["context_length"] = max(settings.local_llm_context_window or 0, 65536)
             if settings.local_llm_max_output:
                 model_cfg["max_tokens"] = settings.local_llm_max_output
             model_cfg["reasoning_effort"] = settings.reasoning_effort or "none"
-            # Local serial backends (max_concurrent_llm=1): title gen steals the slot
-            # and thinking-only turns come back as empty content.
             config["auxiliary"] = {"title_generation": {"enabled": False}}
             if settings.local_llm_base_url:
                 config["custom_providers"] = [
@@ -116,7 +115,7 @@ class HermesPrototype(HermesAuthFlow, HermesAttachments, HermesVoice, HermesSlas
                         "name": settings.gateway_provider(),
                         "base_url": settings.local_llm_base_url,
                         "api_key": settings.local_llm_api_key or "local",
-                        "model": settings.model,
+                        "model": model_name,
                         "extra_body": {
                             "chat_template_kwargs": {"enable_thinking": False},
                         },
@@ -124,8 +123,14 @@ class HermesPrototype(HermesAuthFlow, HermesAttachments, HermesVoice, HermesSlas
                 ]
         if model_cfg:
             config["model"] = model_cfg
-        config = merge_nested(config, settings.config_overrides)
-        (hermes_home / "config.yaml").write_text(json.dumps(config, indent=2), encoding="utf-8")
+        return merge_nested(config, settings.config_overrides)
+
+    def _write_hermes_config(self, *, hermes_home, settings):
+        hermes_home.mkdir(parents=True, exist_ok=True)
+        (hermes_home / "config.yaml").write_text(
+            json.dumps(self._hermes_config_payload(settings), indent=2),
+            encoding="utf-8",
+        )
 
     async def _handle_kind_command(self, *, cmd, args, chat_id, acct_id, reply_to, model_settings, platform="", chat_type=""):
         if cmd == "/start":
@@ -183,16 +188,16 @@ class HermesPrototype(HermesAuthFlow, HermesAttachments, HermesVoice, HermesSlas
                 acct_id=ctx.acct_id,
                 platform=ctx.platform,
                 chat_type=ctx.chat_type,
+                message_id=ctx.reply_to,
             )
             return
 
-        voice_input = await self._prepare_voice_input(attachments=ctx.attachments)
-        combined_text = self._combine_user_text(text=ctx.text, voice_input=voice_input)
-        routed_attachments = voice_input.remaining_attachments
-        reply_with_voice = self._should_send_voice_reply(incoming_had_audio=voice_input.had_audio_input)
+        remaining, transcript, had_audio = await self._prepare_voice_input(attachments=ctx.attachments)
+        combined_text = self._combine_user_text(text=ctx.text, transcript_text=transcript)
+        reply_with_voice = self._should_send_voice_reply(incoming_had_audio=had_audio)
 
-        if not combined_text and not routed_attachments:
-            if voice_input.had_audio_input:
+        if not combined_text and not remaining:
+            if had_audio:
                 await self.send_outbound(
                     text="Hermes could not transcribe the audio message. Check the STT provider or send a clearer recording.",
                     chat_id=ctx.chat_id,
@@ -206,10 +211,11 @@ class HermesPrototype(HermesAuthFlow, HermesAttachments, HermesVoice, HermesSlas
         await self._enqueue_message(
             raw_text=ctx.text,
             combined_text=combined_text,
-            attachments=routed_attachments,
+            attachments=remaining,
             reply_with_voice=reply_with_voice,
             chat_id=ctx.chat_id,
             acct_id=ctx.acct_id,
             platform=ctx.platform,
             chat_type=ctx.chat_type,
+            message_id=ctx.reply_to,
         )

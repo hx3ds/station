@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 
 from station import logger
-from station.prototypes.boundary import ext_dict, ext_list, ext_str
+from station.prototypes.boundary import ext_dict, ext_str
 from station.prototypes.bridge_worker import PrototypeBridgeWorker
 
 @dataclass(slots=True)
@@ -75,56 +75,27 @@ class PiWorker(PrototypeBridgeWorker):
                 )
 
     async def _pop_batched_turn(self, *, state):
-        messages = await self._pop_pending_messages(state=state)
-        if not messages:
-            return None
-        if len(messages) == 1:
-            return messages[0].message, list(messages[0].images)
+        def merge_many(messages):
+            text_parts = []
+            images = []
+            for index, item in enumerate(messages, start=1):
+                text_parts.append(self._queued_followup_label(index, item.message))
+                images.extend(item.images)
+            return "\n\n".join(text_parts), images
 
-        text_parts = []
-        images = []
-        for index, item in enumerate(messages, start=1):
-            text_parts.append(self._queued_followup_label(index, item.message))
-            images.extend(item.images)
-        return "\n\n".join(text_parts), images
+        return await self._pop_batched_items(
+            state=state,
+            merge_one=lambda message: (message.message, list(message.images)),
+            merge_many=merge_many,
+        )
 
     async def _drain_events(self, *, rpc):
-
         queue = rpc.event_queue()
-        text_parts = []
-        current = []
         extra_lines = []
 
         while True:
             event = ext_dict("pi event", await queue.get())
             event_type = ext_str("pi event.type", event.get("type"))
-
-            if event_type == "message_update":
-                delta = event.get("assistantMessageEvent")
-                if delta is None:
-                    continue
-                delta = ext_dict("pi assistantMessageEvent", delta)
-                if delta.get("type") == "text_delta":
-                    chunk = delta.get("delta")
-                    if chunk is not None:
-                        chunk = ext_str("pi text_delta", chunk, strip=False)
-                        if chunk:
-                            current.append(chunk)
-                continue
-
-            if event_type == "message_end":
-                message = event.get("message")
-                if message is not None:
-                    message = ext_dict("pi message", message)
-                    if message.get("role") == "assistant":
-                        text = self._message_text(message)
-                        if text:
-                            text_parts.append(text)
-                        elif current:
-                            text_parts.append("".join(current))
-                current = []
-                continue
-
             if event_type == "extension_error":
                 err = event.get("error")
                 if err is None:
@@ -135,39 +106,12 @@ class PiWorker(PrototypeBridgeWorker):
                     err = ext_str("pi extension error", err)
                 extra_lines.append("Pi extension error: %s" % err)
                 continue
-
-            if event_type == "agent_end":
+            if event_type != "agent_settled":
                 continue
-
-            if event_type == "agent_settled":
-                reply = self._join_reply(text_parts, extra_lines)
-                if reply:
-                    return reply
-                try:
-                    fallback = await rpc.get_last_assistant_text()
-                except Exception:
-                    fallback = ""
-                return fallback.strip() or "Pi turn finished."
-
-    def _message_text(self, message):
-        content = message.get("content")
-        if content is None:
-            return ""
-        if type(content) is str:
-            return content.strip()
-        content = ext_list("pi message.content", content)
-        pieces = []
-        for part in content:
-            part = ext_dict("pi content part", part)
-            if part.get("type") == "text":
-                text = part.get("text")
-                if text is not None:
-                    text = ext_str("pi content text", text)
-                    if text:
-                        pieces.append(text)
-        return "\n".join(pieces).strip()
-
-    def _join_reply(self, text_parts, extra_lines):
-        parts = [part for part in text_parts if part and part.strip()]
-        parts.extend(line for line in extra_lines if line and line.strip())
-        return "\n\n".join(parts).strip()
+            try:
+                fallback = await rpc.get_last_assistant_text()
+            except (OSError, RuntimeError, TypeError, ValueError):
+                fallback = ""
+            parts = [fallback.strip()] if fallback and fallback.strip() else []
+            parts.extend(line for line in extra_lines if line and line.strip())
+            return "\n\n".join(parts).strip() or "Pi turn finished."

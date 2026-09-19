@@ -87,6 +87,20 @@ class WorkspaceAttachmentStaging:
             attachment["workspace_path"] = target_path
         return target_path
 
+    async def _stage_attachments(self, attachments, *, acct_id, chat_id):
+        staged = []
+        for attachment in attachments:
+            if not attachment_str(attachment, "local_path"):
+                continue
+            path = await self._stage_attachment(
+                attachment=attachment,
+                acct_id=acct_id,
+                chat_id=chat_id,
+            )
+            if path:
+                staged.append((attachment, path))
+        return staged
+
     def _build_workspace_attachment_name(self, *, attachment, source_path):
         original_name = attachment_str(attachment, "file_name", "title")
         mime = attachment_str(attachment, "mime_type", "content_type").lower()

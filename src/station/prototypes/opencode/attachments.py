@@ -17,16 +17,11 @@ class OpenCodeAttachments(WorkspaceAttachmentStaging):
         if text:
             parts.append({"type": "text", "text": text})
 
-        for attachment in attachments:
-            if not self._attachment_str(attachment, "local_path"):
-                continue
-            staged_path = await self._stage_attachment(
-                attachment=attachment,
-                acct_id=acct_id,
-                chat_id=chat_id,
-            )
-            if not staged_path:
-                continue
+        for attachment, staged_path in await self._stage_attachments(
+            attachments,
+            acct_id=acct_id,
+            chat_id=chat_id,
+        ):
             image = self._is_image_attachment(attachment, local_path=staged_path)
             if image and skip_image_parts:
                 manifest_lines.append(self._attachment_manifest_line(attachment))

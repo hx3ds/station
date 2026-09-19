@@ -119,3 +119,19 @@ class PrototypeBridgeWorker:
     def _queued_followup_label(index, body, *, empty="(attachment-only follow-up)"):
         text = (body or "").strip() or empty
         return "[Queued follow-up %d]\n%s" % (index, text)
+
+    def _merge_followup_texts(self, items, *, text_of, empty="(attachment-only follow-up)"):
+        if len(items) == 1:
+            return text_of(items[0])
+        return "\n\n".join(
+            self._queued_followup_label(index, text_of(item), empty=empty)
+            for index, item in enumerate(items, start=1)
+        )
+
+    async def _pop_batched_items(self, *, state, merge_one, merge_many):
+        messages = await self._pop_pending_messages(state=state)
+        if not messages:
+            return None
+        if len(messages) == 1:
+            return merge_one(messages[0])
+        return merge_many(messages)

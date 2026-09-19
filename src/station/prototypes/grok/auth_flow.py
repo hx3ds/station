@@ -1,20 +1,14 @@
 import asyncio
 import os
-from dataclasses import dataclass, field
 
 from station import logger
+from station.prototypes.device_auth import PrototypeDeviceAuth, format_device_login_start
 
 from . import auth_store
 from .oauth import begin_device_login, ensure_fresh_credentials, poll_device_code_token
 
-@dataclass(slots=True)
-class ChatAuthState:
-    pending: object = None
-    poll_task: object = None
-    reply_to: object = None
-    guard: asyncio.Lock = field(default_factory=asyncio.Lock)
 
-class GrokAuthFlow:
+class GrokAuthFlow(PrototypeDeviceAuth):
     def _resolve_api_key(self, settings):
         if settings.api_key:
             return settings.api_key
@@ -47,116 +41,51 @@ class GrokAuthFlow:
             logger.error("Grok OAuth refresh failed acct_id=%s error=%s", acct_id, e)
             return None
 
-    async def _await_cancelled_task(self, task):
-        if task is None or task.done():
-            return
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+    async def _start_login(self, *, acct_id, chat_id="", reply_to=None, platform="", chat_type=""):
+        async def begin():
+            return await asyncio.to_thread(begin_device_login)
 
-    async def _get_auth_state(self, acct_id):
-        async with self._auth_states_guard:
-            state = self._auth_states.get(acct_id)
-            if state is None:
-                state = ChatAuthState()
-                self._auth_states[acct_id] = state
-            return state
+        async def poll(pending):
+            return await asyncio.to_thread(poll_device_code_token, pending)
 
-    async def _poll_device_login(self, *, acct_id, chat_id, pending, reply_to=None, platform="", chat_type=""):
-        try:
-            creds = await asyncio.to_thread(poll_device_code_token, pending)
-        except asyncio.CancelledError:
-            raise
-        except (OSError, RuntimeError, TypeError, ValueError) as e:
-            logger.error("Grok device OAuth poll failed acct_id=%s error=%s", acct_id, e)
-            state = await self._get_auth_state(acct_id)
-            async with state.guard:
-                if state.pending is pending:
-                    state.pending = None
-                    state.poll_task = None
-                    state.reply_to = None
+        async def on_success(creds):
+            auth_store.save_credentials(self.storage_dir, acct_id, creds)
             if chat_id:
                 await self.send_outbound(
-                    text="Grok OAuth failed: %s\nSend /login to try again." % e,
+                    text="Signed in to Grok. Send a message to get a completion.",
                     chat_id=chat_id,
                     acct_id=acct_id,
                     reply_to=reply_to,
                     platform=platform,
                     chat_type=chat_type,
                 )
-            return
 
-        state = await self._get_auth_state(acct_id)
-        async with state.guard:
-            if state.pending is not pending:
-                return
-            auth_store.save_credentials(self.storage_dir, acct_id, creds)
-            state.pending = None
-            state.poll_task = None
-            state.reply_to = None
-        if chat_id:
-            await self.send_outbound(
-                text="Signed in to Grok. Send a message to get a completion.",
-                chat_id=chat_id,
-                acct_id=acct_id,
-                reply_to=reply_to,
-                platform=platform,
-                chat_type=chat_type,
+        def start_message(pending):
+            return format_device_login_start(
+                title="Sign in to Grok (xAI device login):",
+                verification_uri=pending.verification_uri,
+                user_code=pending.user_code,
+                verification_uri_complete=pending.verification_uri_complete,
+                commands="/login · /logout · /usage · /generate",
             )
 
-    async def _start_login(self, *, acct_id, chat_id="", reply_to=None, platform="", chat_type=""):
-        state = await self._get_auth_state(acct_id)
-        async with state.guard:
-            old_task = state.poll_task
-            state.poll_task = None
-            state.pending = None
-            state.reply_to = None
-        await self._await_cancelled_task(old_task)
-        try:
-            pending = await asyncio.to_thread(begin_device_login)
-        except (OSError, RuntimeError, TypeError, ValueError) as e:
-            logger.error("Grok device OAuth login start failed acct_id=%s error=%s", acct_id, e)
-            return "Grok OAuth login could not start: %s" % e
-        async with state.guard:
-            state.pending = pending
-            state.reply_to = reply_to
-            state.poll_task = asyncio.create_task(
-                self._poll_device_login(
-                    acct_id=acct_id,
-                    chat_id=chat_id,
-                    pending=pending,
-                    reply_to=reply_to,
-                    platform=platform,
-                    chat_type=chat_type,
-                )
-            )
-        lines = [
-            "Sign in to Grok (xAI device login):",
-            "Open %s on any device and enter code: %s" % (pending.verification_uri, pending.user_code),
-        ]
-        if pending.verification_uri_complete:
-            lines.append("Or open: %s" % pending.verification_uri_complete)
-        lines.extend(
-            [
-                "",
-                "Waiting for authorization...",
-                "Commands: /login · /logout · /usage · /generate",
-            ]
+        return await self._run_device_auth(
+            acct_id=acct_id,
+            chat_id=chat_id,
+            reply_to=reply_to,
+            platform=platform,
+            chat_type=chat_type,
+            name="Grok",
+            begin=begin,
+            poll=poll,
+            on_success=on_success,
+            start_message=start_message,
         )
-        return "\n".join(lines)
 
     async def _handle_auth_command(self, *, cmd, chat_id, acct_id, reply_to=None, platform="", chat_type=""):
         if cmd == "/logout":
             auth_store.delete_credentials(self.storage_dir, acct_id)
-            state = await self._get_auth_state(acct_id)
-            async with state.guard:
-                old_task = state.poll_task
-                state.poll_task = None
-                state.pending = None
-                state.reply_to = None
-            await self._await_cancelled_task(old_task)
+            await self._cancel_device_auth(acct_id=acct_id)
             await self.send_outbound(
                 text="Signed out of Grok OAuth for this account.",
                 chat_id=chat_id,

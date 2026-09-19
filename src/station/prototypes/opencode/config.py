@@ -10,10 +10,13 @@ from station.prototypes.launch_settings import (
     LOCAL_LLM_PROVIDERS,
     collect_provider_env,
     env_str,
+    launch_sections,
     merge_launch_settings,
-    normalize_openai_base_url,
     parse_command_args,
+    first_existing_command,
+    resolve_local_llm,
     split_provider_model,
+    uses_xai as provider_uses_xai,
 )
 
 WORKSPACE_OVERRIDE_NAME = "opencode_workspace"
@@ -73,10 +76,9 @@ def _resolve_opencode_command(server):
             )
         return explicit
 
-    for candidate in _linux_opencode_candidates():
-        usable = _usable_linux_opencode(candidate)
-        if usable:
-            return [usable]
+    found = first_existing_command(path for path in _linux_opencode_candidates() if _usable_linux_opencode(path))
+    if found:
+        return found
 
     installed = shutil.which("opencode")
     if installed:
@@ -180,23 +182,20 @@ class OpenCodeLaunchSettings:
         return self.provider
 
     def uses_xai(self):
-        if self.uses_local_llm():
-            return False
-        if self.provider.lower() in {"xai", "grok"}:
-            return True
-        return self.model.lower().startswith("grok")
+        return provider_uses_xai(self.provider, self.model, local_llm=self.uses_local_llm())
 
     @classmethod
     def from_model_settings(cls, model_settings, *, default_workspace, config_file=None, workspace_override=None):
         raw = merge_launch_settings(model_settings, config_file=config_file)
 
-        model = mapping_get(raw, "model", (dict,), {})
-        server = mapping_get(raw, "server", (dict,), {})
-        workspace = mapping_get(raw, "workspace", (dict,), {})
-        keys = mapping_get(raw, "keys", (dict,), {})
-        env_section = mapping_get(raw, "env", (dict,), {})
-        local_llm = mapping_get(raw, "local_llm", (dict,), {})
-        opencode_overrides = mapping_get(raw, "opencode", (dict,), {})
+        sections = launch_sections(raw, "model", "server", "workspace", "keys", "env", "local_llm", "opencode")
+        model = sections["model"]
+        server = sections["server"]
+        workspace = sections["workspace"]
+        keys = sections["keys"]
+        env_section = sections["env"]
+        local_llm = sections["local_llm"]
+        opencode_overrides = sections["opencode"]
 
         workspace_dir = (
             (workspace_override.strip() if workspace_override else "")
@@ -233,21 +232,23 @@ class OpenCodeLaunchSettings:
         if not provider and model_id.lower().startswith("grok"):
             provider = "xai"
 
-        local_llm_base_url = normalize_openai_base_url(
-            mapping_get(local_llm, "base_url", (str,), "")
-            or mapping_get(model, "base_url", (str,), "")
-            or env_str("LOCAL_LLM_BASE_URL")
+        extra_env = collect_provider_env(keys, env_section)
+        (
+            provider,
+            local_llm_base_url,
+            local_llm_api_key,
+            uses_local_llm,
+            local_llm_context_window,
+            local_llm_max_output,
+        ) = resolve_local_llm(
+            model=model,
+            keys=keys,
+            local_llm=local_llm,
+            extra_env=extra_env,
+            provider=provider,
+            empty_provider=OPENCODE_LOCAL_PROVIDER,
+            max_output_default=8192,
         )
-        local_llm_api_key = (
-            mapping_get(keys, "local_llm_api_key", (str,), "")
-            or mapping_get(local_llm, "api_key", (str,), "")
-            or mapping_get(model, "api_key", (str,), "")
-            or env_str("LOCAL_LLM_API_KEY")
-        )
-        if not provider and local_llm_base_url:
-            provider = OPENCODE_LOCAL_PROVIDER
-
-        uses_local_llm = bool(local_llm_base_url) or provider.lower() in LOCAL_LLM_PROVIDERS
         api_key = (
             (local_llm_api_key or "local")
             if uses_local_llm
@@ -258,13 +259,7 @@ class OpenCodeLaunchSettings:
                 or env_str("GROK_API_KEY")
             )
         )
-        extra_env = collect_provider_env(keys, env_section)
         if uses_local_llm:
-            api_key = api_key or "local"
-            extra_env.setdefault("LOCAL_LLM_API_KEY", api_key)
-            extra_env.setdefault("OPENAI_API_KEY", api_key)
-            if local_llm_base_url:
-                extra_env.setdefault("LOCAL_LLM_BASE_URL", local_llm_base_url)
             local_llm_api_key = api_key
         elif api_key:
             extra_env.setdefault("XAI_API_KEY", api_key)
@@ -294,8 +289,8 @@ class OpenCodeLaunchSettings:
             api_key=api_key,
             local_llm_base_url=local_llm_base_url,
             local_llm_api_key=local_llm_api_key,
-            local_llm_context_window=mapping_get(local_llm, "context_window", (int,), 0),
-            local_llm_max_output=mapping_get(local_llm, "max_output", (int,), 8192),
+            local_llm_context_window=local_llm_context_window,
+            local_llm_max_output=local_llm_max_output,
             opencode_overrides=dict(opencode_overrides),
         )
 

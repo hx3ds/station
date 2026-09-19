@@ -17,6 +17,8 @@ LOCAL_LLM_PROVIDERS = {
     "mlx",
 }
 
+XAI_PROVIDERS = {"xai", "grok", "xai-oauth", "grok-oauth"}
+
 PROVIDER_ENV_KEYS = {
     "openai_api_key": "OPENAI_API_KEY",
     "openrouter_api_key": "OPENROUTER_API_KEY",
@@ -128,3 +130,55 @@ def split_provider_model(model_id, provider=""):
     if not provider and "/" in model_id:
         provider, model_id = model_id.split("/", 1)
     return provider, model_id
+
+def launch_sections(raw, *names):
+    return {name: mapping_get(raw, name, (dict,), {}) for name in names}
+
+def uses_xai(provider, model="", *, local_llm=False):
+    if local_llm:
+        return False
+    if (provider or "").strip().lower() in XAI_PROVIDERS:
+        return True
+    return (model or "").strip().lower().startswith("grok")
+
+def resolve_local_llm(*, model, keys, local_llm, extra_env, provider, empty_provider="", max_output_default=0):
+    base_url = normalize_openai_base_url(
+        mapping_get(local_llm, "base_url", (str,), "")
+        or mapping_get(model, "base_url", (str,), "")
+        or env_str("LOCAL_LLM_BASE_URL")
+    )
+    api_key = (
+        mapping_get(keys, "local_llm_api_key", (str,), "")
+        or mapping_get(local_llm, "api_key", (str,), "")
+        or mapping_get(model, "api_key", (str,), "")
+        or env_str("LOCAL_LLM_API_KEY")
+    )
+    if not (provider or "").strip() and base_url and empty_provider:
+        provider = empty_provider
+    uses = bool(base_url) or (provider or "").strip().lower() in LOCAL_LLM_PROVIDERS
+    if uses:
+        api_key = api_key or "local"
+        extra_env.setdefault("LOCAL_LLM_API_KEY", api_key)
+        extra_env.setdefault("OPENAI_API_KEY", api_key)
+        if base_url:
+            extra_env.setdefault("LOCAL_LLM_BASE_URL", base_url)
+    return (
+        provider,
+        base_url,
+        api_key,
+        uses,
+        mapping_get(local_llm, "context_window", (int,), 0),
+        mapping_get(local_llm, "max_output", (int,), max_output_default),
+    )
+
+def first_existing_command(candidates):
+    for item in candidates:
+        if not item:
+            continue
+        command = [item] if type(item) is str else list(item)
+        if not command:
+            continue
+        exe = command[0]
+        if os.path.isfile(exe) and os.access(exe, os.X_OK):
+            return command
+    return None

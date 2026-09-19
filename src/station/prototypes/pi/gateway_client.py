@@ -142,14 +142,10 @@ class PiRpcProcess(JsonLineRpcProcess):
         return response.get("data")
 
     async def _read_stdout(self):
-        async def on_line(text):
-            frame = self._parse_json_line(text, label="Pi RPC")
-            if frame is None:
-                return
+        async def on_frame(frame):
             await self._handle_frame(ext_dict("Pi RPC frame", frame))
 
-        await self._read_stdout_lines(on_line=on_line, buffered=True)
-        self._fail_pending("Pi RPC stdout closed")
+        await self._pump_stdout(label="Pi RPC", on_frame=on_frame)
 
     async def _handle_frame(self, frame):
         if ext_str("Pi RPC frame type", frame.get("type")) == "response":

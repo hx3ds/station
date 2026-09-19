@@ -1,4 +1,3 @@
-import json
 from pathlib import Path
 
 from station import logger
@@ -69,23 +68,4 @@ class PiPrototype(PiAttachments, PiWorker, PrototypeGateway, Prototype):
             acct_id=ctx.acct_id,
             platform=ctx.platform,
             chat_type=ctx.chat_type,
-        )
-
-    async def handle_event(self, data, model_id, model_settings, chat_id=None, acct_id=None, request_id=None, event_level=None):
-        logger.info(
-            "PiPrototype event level=%s model_id=%s acct_id=%s chat_id=%s payload=%s",
-            event_level,
-            model_id,
-            acct_id,
-            chat_id,
-            json.dumps(data, ensure_ascii=True)[:1000],
-        )
-        await super().handle_event(
-            data,
-            model_id,
-            model_settings,
-            chat_id=chat_id,
-            acct_id=acct_id,
-            request_id=request_id,
-            event_level=event_level,
         )

@@ -1,13 +1,12 @@
-import asyncio
-from dataclasses import dataclass, field
+import json
+from dataclasses import dataclass
 from pathlib import Path
 
 from station import logger
-from station.prototypes.grok.oauth import begin_device_login, poll_device_code_token
-from station.prototypes.launch_settings import LOCAL_LLM_PROVIDERS
+from station.prototypes.boundary import ext_str
+from station.prototypes.device_auth import PrototypeDeviceAuth, format_device_login_start, local_llm_auth_reply
 
-from . import auth_store
-from .config import XAI_DEFAULT_MODEL, XAI_PROVIDERS, xai_model_or_default
+from .config import DEVICE_CODE_PROVIDERS, XAI_PROVIDERS, hermes_home_path
 
 CLOUD_API_ENV_KEYS = (
     "OPENAI_API_KEY",
@@ -27,17 +26,10 @@ class DeviceCodeLoginOption:
     label: str
     provider: str
     aliases: tuple
-    default_model: str = ""
-    implemented: bool = False
 
 
 DEVICE_CODE_LOGINS = (
-    DeviceCodeLoginOption(
-        id="nous",
-        label="Nous Portal",
-        provider="nous",
-        aliases=("nous",),
-    ),
+    DeviceCodeLoginOption(id="nous", label="Nous Portal", provider="nous", aliases=("nous",)),
     DeviceCodeLoginOption(
         id="openai-codex",
         label="ChatGPT / Codex",
@@ -55,19 +47,8 @@ DEVICE_CODE_LOGINS = (
         label="xAI / Grok",
         provider="xai-oauth",
         aliases=("xai", "xai-oauth", "grok", "grok-oauth"),
-        default_model=XAI_DEFAULT_MODEL,
-        implemented=True,
     ),
 )
-
-
-@dataclass(slots=True)
-class HermesAuthState:
-    pending: object = None
-    poll_task: object = None
-    option_id: str = ""
-    reply_to: object = None
-    guard: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 def _login_index_map():
@@ -85,15 +66,15 @@ def _login_index_map():
 LOGIN_CHOICE_MAP = _login_index_map()
 
 
-class HermesAuthFlow:
+class HermesAuthFlow(PrototypeDeviceAuth):
     def _init_auth_flow(self):
-        self._auth_states = {}
-        self._auth_states_guard = asyncio.Lock()
+        self._init_device_auth()
+        self._provider_ready = None
 
     def _hermes_home_path(self):
         if self._hermes_home is not None:
             return Path(self._hermes_home)
-        return Path(self.storage_dir).resolve() / "hermes_home"
+        return hermes_home_path(self.storage_dir)
 
     def _has_cloud_api_key(self, settings):
         for key in CLOUD_API_ENV_KEYS:
@@ -101,34 +82,35 @@ class HermesAuthFlow:
                 return True
         return False
 
-    def _has_usable_inference(self, settings):
-        if settings.uses_xai() or (settings.provider or "").strip().lower() in XAI_PROVIDERS:
-            return self._has_xai_credentials(settings)
-        if self._has_xai_oauth_tokens():
-            return True
-        if settings.local_llm_base_url:
+    async def _provider_is_ready(self):
+        settings = self._launch_settings()
+        if settings.uses_local_llm() or self._has_cloud_api_key(settings):
             return True
         provider = (settings.provider or "").strip().lower()
-        if not provider or provider in LOCAL_LLM_PROVIDERS:
+        if provider and provider not in DEVICE_CODE_PROVIDERS and provider not in XAI_PROVIDERS:
             return False
-        return self._has_cloud_api_key(settings)
+        if self._provider_ready is not None:
+            return self._provider_ready
+        gateway = await self._ensure_gateway()
+        try:
+            result = await gateway.request("auth.status", {"provider": settings.gateway_provider()})
+        except RuntimeError as e:
+            logger.error("Hermes auth.status failed model_id=%s error=%s", self.model_id, e)
+            return False
+        self._provider_ready = bool((result or {}).get("logged_in"))
+        return self._provider_ready
 
     def _is_missing_provider_error(self, message):
         text = (message or "").lower()
         return "no llm provider configured" in text
 
-    def _provider_is_configured(self, settings):
-        return self._has_usable_inference(settings)
-
-    def _has_xai_oauth_tokens(self):
-        return auth_store.load_xai_credentials(self._hermes_home_path()) is not None
-
-    def _has_xai_credentials(self, settings=None):
-        if settings is None:
-            settings = self._launch_settings()
-        if (settings.extra_env.get("XAI_API_KEY") or "").strip():
-            return True
-        return self._has_xai_oauth_tokens()
+    def _default_login_option(self, settings):
+        if settings.uses_xai():
+            return LOGIN_CHOICE_MAP["xai"]
+        provider = (settings.provider or "").strip().lower()
+        if not provider:
+            return None
+        return LOGIN_CHOICE_MAP.get(provider)
 
     def _login_picker_keyboard(self):
         return [
@@ -167,40 +149,8 @@ class HermesAuthFlow:
             return None
         return LOGIN_CHOICE_MAP.get(raw.lower())
 
-    async def _get_auth_state(self, acct_id):
-        async with self._auth_states_guard:
-            state = self._auth_states.get(acct_id)
-            if state is None:
-                state = HermesAuthState()
-                self._auth_states[acct_id] = state
-            return state
-
-    async def _await_cancelled_task(self, task):
-        if task is None or task.done():
-            return
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-
-    async def _cancel_auth_login(self, *, acct_id=None):
-        if acct_id is None:
-            async with self._auth_states_guard:
-                states = list(self._auth_states.values())
-        else:
-            states = [await self._get_auth_state(acct_id)]
-        for state in states:
-            async with state.guard:
-                old_task = state.poll_task
-                state.poll_task = None
-                state.pending = None
-                state.option_id = ""
-                state.reply_to = None
-            await self._await_cancelled_task(old_task)
-
     async def _before_teardown_gateway(self):
-        await self._cancel_auth_login()
+        await self._cancel_device_auth()
         await super()._before_teardown_gateway()
 
     async def _reload_gateway_after_login(self):
@@ -220,19 +170,14 @@ class HermesAuthFlow:
     async def _handle_auth_command(self, *, cmd, args="", chat_id, acct_id, reply_to=None, platform="", chat_type=""):
         settings = self._launch_settings()
         if settings.uses_local_llm():
-            if cmd == "/logout":
-                text = "Hermes local LLM uses an API key. There is no cloud session to sign out of."
-            else:
-                text = (
-                    "Hermes is using a local LLM at %s (provider %s, model %s). No cloud login is required."
-                    % (
-                        settings.local_llm_base_url or "LOCAL_LLM_BASE_URL",
-                        settings.gateway_provider(),
-                        settings.model or settings.provider,
-                    )
-                )
             await self.send_outbound(
-                text=text,
+                text=local_llm_auth_reply(
+                    "Hermes",
+                    logout=cmd == "/logout",
+                    base_url=settings.local_llm_base_url,
+                    provider=settings.gateway_provider(),
+                    model=settings.model or settings.provider,
+                ),
                 chat_id=chat_id,
                 acct_id=acct_id,
                 reply_to=reply_to,
@@ -250,8 +195,8 @@ class HermesAuthFlow:
             )
             return
         choice = self._resolve_device_login_choice(args)
-        if choice is None and not (args or "").strip() and settings.uses_xai():
-            choice = LOGIN_CHOICE_MAP["xai"]
+        if choice is None and not (args or "").strip():
+            choice = self._default_login_option(settings)
         if choice is None:
             await self._send_login_picker(
                 chat_id=chat_id,
@@ -270,11 +215,29 @@ class HermesAuthFlow:
             chat_type=chat_type,
         )
 
+    def _strip_saved_provider(self):
+        path = self._hermes_home_path() / "config.yaml"
+        if not path.is_file():
+            return
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if not isinstance(data, dict):
+            return
+        model = data.get("model")
+        if isinstance(model, dict):
+            model.pop("provider", None)
+            model.pop("default", None)
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
     async def _logout(self, *, chat_id, acct_id, reply_to=None, platform="", chat_type=""):
-        await self._cancel_auth_login(acct_id=acct_id)
-        auth_store.delete_selected_provider(self.storage_dir)
-        auth_store.delete_device_login_credentials(self._hermes_home_path())
+        await self._cancel_device_auth(acct_id=acct_id)
+        gateway = await self._ensure_gateway()
+        await gateway.request("auth.clear", {})
+        self._strip_saved_provider()
         self._settings = None
+        self._provider_ready = False
         logger.info("Hermes device login removed acct_id=%s", acct_id)
         await self.send_outbound(
             text="Signed out of Hermes device login. Send /login to choose a provider.",
@@ -286,20 +249,12 @@ class HermesAuthFlow:
         )
 
     async def _ensure_provider_auth(self, *, acct_id, chat_id, text="", reply_to=None, platform="", chat_type=""):
-        settings = self._launch_settings()
-        if self._has_usable_inference(settings):
+        if await self._provider_is_ready():
             return True
-        if settings.uses_xai():
-            await self._start_provider_login(
-                LOGIN_CHOICE_MAP["xai"],
-                acct_id=acct_id,
-                chat_id=chat_id,
-                reply_to=reply_to,
-                platform=platform,
-                chat_type=chat_type,
-            )
-            return False
-        choice = self._resolve_device_login_choice(text)
+        settings = self._launch_settings()
+        choice = self._default_login_option(settings)
+        if choice is None:
+            choice = self._resolve_device_login_choice(text)
         if choice is not None:
             await self._start_provider_login(
                 choice,
@@ -320,21 +275,8 @@ class HermesAuthFlow:
         return False
 
     async def _start_provider_login(self, option, *, acct_id, chat_id="", reply_to=None, platform="", chat_type=""):
-        if not option.implemented:
-            await self.send_outbound(
-                text=(
-                    "Station's Hermes bridge currently supports xAI / Grok device login.\n"
-                    "For %s, set `[model].provider = \"%s\"` or an API key, then send another message."
-                    % (option.label, option.provider)
-                ),
-                chat_id=chat_id,
-                acct_id=acct_id,
-                reply_to=reply_to,
-                platform=platform,
-                chat_type=chat_type,
-            )
-            return
-        reply = await self._start_xai_login(
+        reply = await self._start_device_login(
+            option,
             acct_id=acct_id,
             chat_id=chat_id,
             reply_to=reply_to,
@@ -350,103 +292,75 @@ class HermesAuthFlow:
             chat_type=chat_type,
         )
 
-    async def _start_xai_login(self, *, acct_id, chat_id="", reply_to=None, platform="", chat_type=""):
-        state = await self._get_auth_state(acct_id)
-        async with state.guard:
-            old_task = state.poll_task
-            state.poll_task = None
-            state.pending = None
-            state.option_id = ""
-            state.reply_to = None
-        await self._await_cancelled_task(old_task)
-        try:
-            pending = await asyncio.to_thread(begin_device_login)
-        except (OSError, RuntimeError, TypeError, ValueError) as e:
-            logger.error("Hermes xAI device OAuth login start failed acct_id=%s error=%s", acct_id, e)
-            return "Hermes xAI OAuth login could not start: %s" % e
-        async with state.guard:
-            state.pending = pending
-            state.option_id = "xai"
-            state.reply_to = reply_to
-            state.poll_task = asyncio.create_task(
-                self._poll_xai_device_login(
-                    acct_id=acct_id,
-                    chat_id=chat_id,
-                    pending=pending,
-                    reply_to=reply_to,
-                    platform=platform,
-                    chat_type=chat_type,
-                )
-            )
-        lines = [
-            "Sign in to xAI / Grok (device login):",
-            "Open %s on any device and enter code: %s" % (pending.verification_uri, pending.user_code),
-        ]
-        if pending.verification_uri_complete:
-            lines.append("Or open: %s" % pending.verification_uri_complete)
-        lines.extend(
-            [
-                "",
-                "Waiting for authorization...",
-                "Commands: /login · /logout",
-            ]
-        )
-        return "\n".join(lines)
+    async def _run_device_login_op(self, op, option, pending=None):
+        gateway = await self._ensure_gateway()
+        method = "auth.begin" if op == "auth_begin" else "auth.poll"
+        params = {"provider": option.provider}
+        if pending is not None:
+            params["pending"] = pending
+        result = await gateway.request(method, params)
+        if result is None:
+            return {}
+        return result
 
-    async def _poll_xai_device_login(self, *, acct_id, chat_id, pending, reply_to=None, platform="", chat_type=""):
-        try:
-            creds = await asyncio.to_thread(poll_device_code_token, pending)
-        except asyncio.CancelledError:
-            raise
-        except (OSError, RuntimeError, TypeError, ValueError) as e:
-            logger.error("Hermes xAI device OAuth poll failed acct_id=%s error=%s", acct_id, e)
-            state = await self._get_auth_state(acct_id)
-            async with state.guard:
-                if state.pending is pending:
-                    state.pending = None
-                    state.poll_task = None
-                    state.option_id = ""
-                    state.reply_to = None
-            if chat_id:
-                await self.send_outbound(
-                    text="Hermes xAI OAuth failed: %s\nSend /login to try again." % e,
-                    chat_id=chat_id,
-                    acct_id=acct_id,
-                    reply_to=reply_to,
-                    platform=platform,
-                    chat_type=chat_type,
-                )
-            return
+    async def _start_device_login(self, option, *, acct_id, chat_id="", reply_to=None, platform="", chat_type=""):
+        name = "Hermes %s" % option.label
 
-        state = await self._get_auth_state(acct_id)
-        async with state.guard:
-            if state.pending is not pending:
-                return
-            hermes_home = self._hermes_home_path()
-            auth_store.save_xai_credentials(hermes_home, creds)
-            auth_store.save_selected_provider(
-                self.storage_dir,
-                provider="xai-oauth",
-                model=self._xai_model_name(),
-            )
+        async def begin():
+            return await self._run_device_login_op("auth_begin", option)
+
+        async def poll(pending):
+            return await self._run_device_login_op("auth_poll", option, pending=pending)
+
+        async def on_success(result):
+            model = ext_str("model", result.get("model"))
+            settings = self._launch_settings()
+            settings.provider = option.provider
+            settings.model = model or settings.model
+            self._write_hermes_config(hermes_home=self._hermes_home_path(), settings=settings)
             self._settings = None
-            state.pending = None
-            state.poll_task = None
-            state.option_id = ""
-            state.reply_to = None
-        try:
-            await self._reload_gateway_after_login()
-        except Exception:
-            logger.exception("Hermes gateway restart after xAI login failed acct_id=%s", acct_id)
-        if chat_id:
-            await self.send_outbound(
-                text="Signed in to xAI / Grok. Send a message to start.",
-                chat_id=chat_id,
-                acct_id=acct_id,
-                reply_to=reply_to,
-                platform=platform,
-                chat_type=chat_type,
+            self._provider_ready = True
+            try:
+                await self._reload_gateway_after_login()
+            except Exception:
+                logger.exception(
+                    "Hermes gateway restart after %s login failed acct_id=%s",
+                    option.label,
+                    acct_id,
+                )
+            if chat_id:
+                text = "Signed in to %s. Send a message to start." % option.label
+                if model:
+                    text = "Signed in to %s (%s). Send a message to start." % (option.label, model)
+                await self.send_outbound(
+                    text=text,
+                    chat_id=chat_id,
+                    acct_id=acct_id,
+                    reply_to=reply_to,
+                    platform=platform,
+                    chat_type=chat_type,
+                )
+
+        def start_message(pending):
+            return format_device_login_start(
+                title="Sign in to %s (device login):" % option.label,
+                verification_uri=ext_str("verification_uri", pending.get("verification_uri")),
+                user_code=ext_str("user_code", pending.get("user_code")),
+                verification_uri_complete=ext_str(
+                    "verification_uri_complete",
+                    pending.get("verification_uri_complete"),
+                ),
             )
 
-    def _xai_model_name(self):
-        return xai_model_or_default(self._launch_settings().model)
+        return await self._run_device_auth(
+            acct_id=acct_id,
+            chat_id=chat_id,
+            reply_to=reply_to,
+            platform=platform,
+            chat_type=chat_type,
+            name=name,
+            begin=begin,
+            poll=poll,
+            on_success=on_success,
+            start_message=start_message,
+        )

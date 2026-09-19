@@ -3,19 +3,14 @@ import mimetypes
 import os
 
 from station import logger
-from station.prototypes.voice_policy import (
-    should_send_voice_reply,
-    voice_delivery_attachment_type,
-    voice_delivery_mime,
-    voice_delivery_suffix,
-)
+from station.prototypes.voice import PrototypeVoice
 
 from . import auth_store
 from .client import complete_chat, fetch_usage, generate_image, synthesize_speech, transcribe_audio
 
 BUSY_REPLY_TEXT = "I'm still processing your previous message. Please wait."
 
-class GrokTurn:
+class GrokTurn(PrototypeVoice):
     async def _send_photo(self, *, chat_id, acct_id, image_bytes, mime="image/png", caption="", platform="", chat_type=""):
         if not image_bytes:
             return
@@ -83,20 +78,13 @@ class GrokTurn:
         if not audio:
             logger.warning("Grok TTS produced no audio chat_id=%s", chat_id)
             return
-
-        att_type = voice_delivery_attachment_type(settings.voice_delivery_method)
-        suffix = voice_delivery_suffix(settings.voice_delivery_method)
-        mime = voice_delivery_mime(settings.voice_delivery_method, content_type)
-        meta = self.save_temp(
-            data=audio,
-            original_name="grok_tts%s" % suffix,
-            mime_type=mime,
-        )
-        await self.send_outbound(
-            text="",
-            attachments=[{"type": att_type, "file_id": meta["file_id"]}],
+        await self._send_voice_bytes(
             chat_id=chat_id,
             acct_id=acct_id,
+            audio_bytes=audio,
+            delivery_method=settings.voice_delivery_method,
+            content_type=content_type,
+            name="grok_tts",
             platform=platform,
             chat_type=chat_type,
         )
@@ -302,9 +290,9 @@ class GrokTurn:
                 chat_type=chat_type,
             )
 
-            send_voice = should_send_voice_reply(
-                reply_mode=settings.voice_reply_mode,
+            send_voice = self._should_send_voice_reply(
                 incoming_had_audio=voice_attachment is not None,
+                reply_mode=settings.voice_reply_mode,
             )
             if send_voice:
                 if reply_text and not reply_text.startswith("Grok request failed:") and "Sign in to Grok" not in reply_text:

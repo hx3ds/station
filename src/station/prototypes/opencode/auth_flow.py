@@ -1,41 +1,27 @@
-import asyncio
-from dataclasses import dataclass, field
-
 import aiohttp
 
 from station import logger
 from station.prototypes.boundary import ext_str
+from station.prototypes.device_auth import PrototypeDeviceAuth, local_llm_auth_reply
 
 from .config import OPENCODE_LOCAL_PROVIDER
 
 XAI_PROVIDER_ID = "xai"
+OAUTH_ERRORS = (aiohttp.ClientError, OSError, RuntimeError, TypeError)
 
-@dataclass(slots=True)
-class OauthLoginState:
-    method_index: int = -1
-    poll_task: object = None
-    chat_id: str = ""
-    acct_id: str = ""
-    reply_to: object = None
-    guard: asyncio.Lock = field(default_factory=asyncio.Lock)
 
-class OpenCodeAuthFlow:
+class OpenCodeAuthFlow(PrototypeDeviceAuth):
     async def _handle_auth_command(self, *, cmd, chat_id, acct_id, reply_to=None, platform="", chat_type=""):
         settings = self._launch_settings()
         if settings.uses_local_llm():
-            if cmd == "/logout":
-                text = "OpenCode local LLM uses an API key. There is no cloud session to sign out of."
-            else:
-                text = (
-                    "OpenCode is using a local LLM at %s (provider %s, model %s). No cloud login is required."
-                    % (
-                        settings.local_llm_base_url or "LOCAL_LLM_BASE_URL",
-                        settings.gateway_provider(),
-                        settings.model or settings.provider,
-                    )
-                )
             await self.send_outbound(
-                text=text,
+                text=local_llm_auth_reply(
+                    "OpenCode",
+                    logout=cmd == "/logout",
+                    base_url=settings.local_llm_base_url,
+                    provider=settings.gateway_provider(),
+                    model=settings.model or settings.provider,
+                ),
                 chat_id=chat_id,
                 acct_id=acct_id,
                 reply_to=reply_to,
@@ -44,7 +30,7 @@ class OpenCodeAuthFlow:
             )
             return
         if cmd == "/logout":
-            await self._cancel_oauth_login()
+            await self._cancel_device_auth(acct_id=acct_id)
             gateway = await self._ensure_gateway()
             await gateway.auth_remove(provider_id=XAI_PROVIDER_ID)
             self._applied_provider_auth = ""
@@ -99,9 +85,9 @@ class OpenCodeAuthFlow:
             return True
         if await gateway.provider_connected(XAI_PROVIDER_ID):
             return True
-        async with self._oauth_login.guard:
-            task = self._oauth_login.poll_task
-            in_progress = task is not None and not task.done()
+        state = await self._get_auth_state(acct_id)
+        async with state.guard:
+            in_progress = self._device_auth_in_progress(state)
         if in_progress:
             await self.send_outbound(
                 text="OpenCode xAI login already in progress. Finish the browser approval, or send /login again.",
@@ -139,103 +125,68 @@ class OpenCodeAuthFlow:
     async def _apply_xai_api_key(self, gateway, api_key):
         await self._apply_provider_api_key(gateway, XAI_PROVIDER_ID, api_key)
 
-    async def _cancel_oauth_login(self):
-        async with self._oauth_login.guard:
-            task = self._oauth_login.poll_task
-            self._oauth_login.poll_task = None
-            self._oauth_login.method_index = -1
-            self._oauth_login.reply_to = None
-        if task is None or task.done():
-            return
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+    async def _start_login(self, *, acct_id, chat_id="", reply_to=None, platform="", chat_type=""):
+        gateway_holder = {}
 
-    async def _await_oauth_callback(self, *, gateway, method_index, chat_id, acct_id, reply_to=None, platform="", chat_type=""):
-        try:
-            await gateway.oauth_callback(provider_id=XAI_PROVIDER_ID, method=method_index)
-        except asyncio.CancelledError:
-            raise
-        except (aiohttp.ClientError, OSError, RuntimeError, TypeError) as e:
-            logger.error("OpenCode xAI OAuth callback failed acct_id=%s error=%s", acct_id, e)
-            async with self._oauth_login.guard:
-                if self._oauth_login.poll_task is asyncio.current_task():
-                    self._oauth_login.poll_task = None
-                    self._oauth_login.method_index = -1
-                    self._oauth_login.reply_to = None
+        async def begin():
+            gateway = await self._ensure_gateway()
+            gateway_holder["gateway"] = gateway
+            method_index = await gateway.resolve_oauth_method_index(provider_id=XAI_PROVIDER_ID)
+            auth = await gateway.oauth_authorize(provider_id=XAI_PROVIDER_ID, method=method_index)
+            return {
+                "method_index": method_index,
+                "url": ext_str("oauth authorize url", auth.get("url")),
+                "instructions": ext_str("oauth authorize instructions", auth.get("instructions")),
+                "method": ext_str("oauth authorize method", auth.get("method")).lower() or "auto",
+            }
+
+        async def poll(pending):
+            await gateway_holder["gateway"].oauth_callback(
+                provider_id=XAI_PROVIDER_ID,
+                method=pending["method_index"],
+            )
+
+        async def on_success(_result):
+            logger.info("OpenCode xAI OAuth completed acct_id=%s", acct_id)
             if chat_id:
                 await self.send_outbound(
-                    text="OpenCode xAI OAuth failed: %s\nSend /login to try again." % e,
+                    text="Signed in to OpenCode xAI. Send a message to use Grok models.",
                     chat_id=chat_id,
                     acct_id=acct_id,
                     reply_to=reply_to,
                     platform=platform,
                     chat_type=chat_type,
                 )
-            return
 
-        async with self._oauth_login.guard:
-            if self._oauth_login.poll_task is not asyncio.current_task():
-                return
-            self._oauth_login.poll_task = None
-            self._oauth_login.method_index = -1
-            self._oauth_login.reply_to = None
-        logger.info("OpenCode xAI OAuth completed acct_id=%s", acct_id)
-        if chat_id:
-            await self.send_outbound(
-                text="Signed in to OpenCode xAI. Send a message to use Grok models.",
-                chat_id=chat_id,
-                acct_id=acct_id,
-                reply_to=reply_to,
-                platform=platform,
-                chat_type=chat_type,
+        def start_message(pending):
+            lines = ["Sign in to OpenCode xAI (SuperGrok / device login):"]
+            instructions = pending["instructions"]
+            url = pending["url"]
+            if instructions:
+                lines.append(instructions)
+            if url and (not instructions or url not in instructions):
+                lines.append("Open: %s" % url)
+            if pending["method"] == "code":
+                lines.append("After approving, reply with the authorization code if OpenCode asks for one.")
+            lines.extend(
+                [
+                    "",
+                    "Waiting for OpenCode to finish OAuth...",
+                    "Commands: /login · /logout",
+                ]
             )
+            return "\n".join(lines)
 
-    async def _start_login(self, *, acct_id, chat_id="", reply_to=None, platform="", chat_type=""):
-        await self._cancel_oauth_login()
-        try:
-            gateway = await self._ensure_gateway()
-            method_index = await gateway.resolve_oauth_method_index(provider_id=XAI_PROVIDER_ID)
-            auth = await gateway.oauth_authorize(provider_id=XAI_PROVIDER_ID, method=method_index)
-
-            url = ext_str("oauth authorize url", auth.get("url"))
-            instructions = ext_str("oauth authorize instructions", auth.get("instructions"))
-            method = ext_str("oauth authorize method", auth.get("method")).lower() or "auto"
-        except (aiohttp.ClientError, OSError, RuntimeError, TypeError) as e:
-            logger.error("OpenCode xAI OAuth login start failed acct_id=%s error=%s", acct_id, e)
-            return "OpenCode xAI OAuth login could not start: %s" % e
-        async with self._oauth_login.guard:
-            self._oauth_login.method_index = method_index
-            self._oauth_login.chat_id = chat_id
-            self._oauth_login.acct_id = acct_id
-            self._oauth_login.reply_to = reply_to
-            self._oauth_login.poll_task = asyncio.create_task(
-                self._await_oauth_callback(
-                    gateway=gateway,
-                    method_index=method_index,
-                    chat_id=chat_id,
-                    acct_id=acct_id,
-                    reply_to=reply_to,
-                    platform=platform,
-                    chat_type=chat_type,
-                ),
-                name="opencode-oauth-callback:%s:%s" % (acct_id, chat_id),
-            )
-
-        lines = ["Sign in to OpenCode xAI (SuperGrok / device login):"]
-        if instructions:
-            lines.append(instructions)
-        if url and (not instructions or url not in instructions):
-            lines.append("Open: %s" % url)
-        if method == "code":
-            lines.append("After approving, reply with the authorization code if OpenCode asks for one.")
-        lines.extend(
-            [
-                "",
-                "Waiting for OpenCode to finish OAuth...",
-                "Commands: /login · /logout",
-            ]
+        return await self._run_device_auth(
+            acct_id=acct_id,
+            chat_id=chat_id,
+            reply_to=reply_to,
+            platform=platform,
+            chat_type=chat_type,
+            name="OpenCode xAI",
+            begin=begin,
+            poll=poll,
+            on_success=on_success,
+            start_message=start_message,
+            errors=OAUTH_ERRORS,
         )
-        return "\n".join(lines)

@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 
 from station.config.config import mapping_get
-from station.prototypes.launch_settings import merge_launch_settings, voice_settings_from_mapping
+from station.prototypes.launch_settings import launch_sections, merge_launch_settings, voice_settings_from_mapping
 
 @dataclass(slots=True)
 class GrokLaunchSettings:
@@ -27,12 +27,13 @@ class GrokLaunchSettings:
     def from_model_settings(cls, model_settings, *, config_file=None):
         raw = merge_launch_settings(model_settings, config_file=config_file)
 
-        model = mapping_get(raw, "model", (dict,), {})
-        oauth = mapping_get(raw, "oauth", (dict,), {})
-        sampling = mapping_get(raw, "sampling", (dict,), {})
-        voice = mapping_get(raw, "voice", (dict,), {})
-        realtime = mapping_get(raw, "realtime", (dict,), {})
-        image = mapping_get(raw, "image", (dict,), {})
+        sections = launch_sections(raw, "model", "oauth", "sampling", "voice", "realtime", "image")
+        model = sections["model"]
+        oauth = sections["oauth"]
+        sampling = sections["sampling"]
+        voice = sections["voice"]
+        realtime = sections["realtime"]
+        image = sections["image"]
 
         voice_reply_mode, voice_delivery_method = voice_settings_from_mapping(
             voice,
