@@ -2,7 +2,8 @@ import os
 import shlex
 from urllib.parse import urlparse
 
-from station.config.config import load_optional_toml, mapping_get, merge_nested, require_type
+from station.config.config import load_optional_toml, merge_nested
+from station.prototypes.boundary import ext_list, ext_mapping_get, ext_require, parse_env_int
 from station.prototypes.voice_policy import parse_voice_delivery_method, parse_voice_reply_mode
 
 LOCAL_LLM_PROVIDERS = {
@@ -44,7 +45,6 @@ _PROXY_ENV_KEYS = (
 
 
 def apply_local_provider_env(env, *, base_url=""):
-    """Drop HTTP proxies so LAN OpenAI-compatible endpoints are not sent through Clash/VPN."""
     cleaned = dict(env)
     for key in _PROXY_ENV_KEYS:
         cleaned.pop(key, None)
@@ -76,28 +76,34 @@ def normalize_openai_base_url(url):
     return text + "/v1"
 
 def merge_launch_settings(model_settings, *, config_file=None):
-    require_type("model_settings", model_settings, (dict,))
+    ext_require("model_settings", model_settings, (dict,))
     return merge_nested(load_optional_toml(config_file, "prototype config file"), model_settings)
 
 def collect_env_section(env_section):
     extra_env = {}
     for env_key, env_value in env_section.items():
-        require_type("env.%s" % env_key, env_value, (str,))
+        ext_require("env.%s" % env_key, env_value, (str,))
         if env_key.strip() and env_value.strip():
             extra_env[env_key.strip()] = env_value
     return extra_env
 
 def voice_settings_from_mapping(voice, *, reply_mode_default="", delivery_method_default="voice"):
     return (
-        parse_voice_reply_mode(mapping_get(voice, "reply_mode", (str,), reply_mode_default)),
+        parse_voice_reply_mode(ext_mapping_get(voice, "reply_mode", (str,), reply_mode_default)),
         parse_voice_delivery_method(
-            mapping_get(voice, "delivery_method", (str,), delivery_method_default),
+            ext_mapping_get(voice, "delivery_method", (str,), delivery_method_default),
             default=delivery_method_default or "voice",
         ),
     )
 
 def env_str(name):
     return os.getenv(name, "").strip()
+
+def env_int(name, default=0):
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    return parse_env_int(name, raw)
 
 def parse_command_args(value, label):
 
@@ -107,10 +113,10 @@ def parse_command_args(value, label):
         if not value.strip():
             return []
         return shlex.split(value)
-    require_type(label, value, (list,))
+    items = ext_list(label, value)
     args = []
-    for item in value:
-        require_type("%s item" % label, item, (str,))
+    for item in items:
+        ext_require("%s item" % label, item, (str,))
         if item.strip():
             args.append(item.strip())
     return args
@@ -119,7 +125,7 @@ def collect_provider_env(keys, env_section, *, env_keys=None):
     extra_env = collect_env_section(env_section)
     mapping = env_keys if env_keys is not None else PROVIDER_ENV_KEYS
     for source_key, target_key in mapping.items():
-        value = mapping_get(keys, source_key, (str,), "")
+        value = ext_mapping_get(keys, source_key, (str,), "")
         if value.strip():
             extra_env[target_key] = value.strip()
     return extra_env
@@ -132,7 +138,7 @@ def split_provider_model(model_id, provider=""):
     return provider, model_id
 
 def launch_sections(raw, *names):
-    return {name: mapping_get(raw, name, (dict,), {}) for name in names}
+    return {name: ext_mapping_get(raw, name, (dict,), {}) for name in names}
 
 def uses_xai(provider, model="", *, local_llm=False):
     if local_llm:
@@ -143,14 +149,14 @@ def uses_xai(provider, model="", *, local_llm=False):
 
 def resolve_local_llm(*, model, keys, local_llm, extra_env, provider, empty_provider="", max_output_default=0):
     base_url = normalize_openai_base_url(
-        mapping_get(local_llm, "base_url", (str,), "")
-        or mapping_get(model, "base_url", (str,), "")
+        ext_mapping_get(local_llm, "base_url", (str,), "")
+        or ext_mapping_get(model, "base_url", (str,), "")
         or env_str("LOCAL_LLM_BASE_URL")
     )
     api_key = (
-        mapping_get(keys, "local_llm_api_key", (str,), "")
-        or mapping_get(local_llm, "api_key", (str,), "")
-        or mapping_get(model, "api_key", (str,), "")
+        ext_mapping_get(keys, "local_llm_api_key", (str,), "")
+        or ext_mapping_get(local_llm, "api_key", (str,), "")
+        or ext_mapping_get(model, "api_key", (str,), "")
         or env_str("LOCAL_LLM_API_KEY")
     )
     if not (provider or "").strip() and base_url and empty_provider:
@@ -167,8 +173,8 @@ def resolve_local_llm(*, model, keys, local_llm, extra_env, provider, empty_prov
         base_url,
         api_key,
         uses,
-        mapping_get(local_llm, "context_window", (int,), 0),
-        mapping_get(local_llm, "max_output", (int,), max_output_default),
+        ext_mapping_get(local_llm, "context_window", (int,), 0),
+        ext_mapping_get(local_llm, "max_output", (int,), max_output_default),
     )
 
 def first_existing_command(candidates):

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from station.client.context import ClientContext
+from station.errors import ExternalError, InternalError
 from station.prototypes.registry import resolve_prototype_class
 from station.tenants.token_state import TokenState
 
@@ -40,10 +41,10 @@ class TenantRegistry:
     @property
     def primary(self) -> Tenant:
         if self._primary_id is None:
-            raise RuntimeError("TenantRegistry has no primary tenant")
+            raise InternalError("TenantRegistry has no primary tenant")
         tenant = self._by_id.get(self._primary_id)
         if tenant is None:
-            raise RuntimeError("TenantRegistry primary tenant missing")
+            raise InternalError("TenantRegistry primary tenant missing")
         return tenant
 
     @property
@@ -81,36 +82,22 @@ class TenantRegistry:
 
     def add(self, tenant: Tenant, *, primary: bool = False) -> Tenant:
         if tenant.id is None:
-            raise ValueError("tenant.id is required")
+            raise ExternalError("tenant.id is required")
         pid = tenant.id
         if pid in self._by_id:
-            raise ValueError(f"Duplicate prototype_id: {pid}")
+            raise ExternalError("Duplicate prototype_id: %s" % pid, status=409)
         token = (tenant.token or "").strip()
         if not token:
-            raise ValueError(f"prototype_id={pid} missing token")
+            raise ExternalError("prototype_id=%s missing token" % pid)
         existing = self._by_token.get(token)
         if existing is not None and existing.id != pid:
-            raise ValueError(f"Duplicate prototype token for prototype_id={pid}")
+            raise ExternalError("Duplicate prototype token for prototype_id=%s" % pid, status=409)
         self._by_id[pid] = tenant
         self._index_token(tenant, token)
         if pid not in self._order:
             self._order.append(pid)
         if primary or self._primary_id is None:
             self._primary_id = pid
-        return tenant
-
-    def detach(self, prototype_id: int) -> Tenant | None:
-        tenant = self.get(prototype_id)
-        if tenant is None:
-            return None
-        pid = tenant.id
-        self._by_id.pop(pid, None)
-        self._drop_token(tenant.token)
-        if tenant.token_state.previous_token:
-            self._drop_token(tenant.token_state.previous_token)
-        self._order = [x for x in self._order if x != pid]
-        if self._primary_id == pid:
-            self._primary_id = self._order[0] if self._order else None
         return tenant
 
     async def rotate_token(
@@ -125,7 +112,7 @@ class TenantRegistry:
         else:
             tenant = self.get(prototype_id)
             if tenant is None:
-                raise KeyError(f"prototype_id not hosted: {prototype_id}")
+                raise ExternalError(f"prototype_id not hosted: {prototype_id}", status=404)
         old_token = tenant.token
         old_previous = tenant.token_state.previous_token
         await tenant.token_state.rotate_token(new_token, grace_seconds=grace_seconds)
@@ -138,6 +125,3 @@ class TenantRegistry:
         if tenant.client_context is not None:
             tenant.client_context.token = tenant.token
         return tenant
-
-    def any_local(self) -> bool:
-        return any(t.is_local for t in self._by_id.values())

@@ -12,7 +12,8 @@ from station.conductor.platforms.keyboard import parse_keyboard, telegram_reply_
 from station.conductor.platforms.telegram_network import TelegramFallbackResolver, discover_fallback_ips, parse_fallback_ip_env
 from station.conductor.util import inbound_request_id, ext_str, ext_id, ext_bool, ext_int
 from station import logger
-from station.prototypes.boundary import ext_dict, ext_float, ext_list, ext_require
+from station.errors import ExternalError
+from station.prototypes.boundary import ext_dict, ext_float, ext_list
 
 _TELEGRAM_API_BASE = "https://api.telegram.org"
 _TELEGRAM_API_HOST = "api.telegram.org"
@@ -43,7 +44,7 @@ def effective_message_thread_id(msg: dict) -> str:
     msg = ext_dict('telegram message', msg)
     chat = msg.get("chat")
     if chat is None:
-        raise TypeError("telegram message chat required")
+        raise ExternalError("telegram message chat required")
     chat = ext_dict('telegram message chat', chat)
     chat_type = ext_str(chat.get("type"), "type").strip().lower()
     raw = msg.get("message_thread_id")

@@ -1,5 +1,7 @@
 import re
 
+from station.errors import ExternalError
+
 LOCAL_PLATFORM_TYPE_MAX_LENGTH = 15
 LOCAL_PLATFORM_TYPE_REGEX = re.compile(r"^[a-z][a-z0-9_-]{0,14}$")
 QR_ACCOUNT_TYPE_PREFIX = "qr:"
@@ -19,17 +21,15 @@ def strip_qr_prefix(value):
 def validate_bare_platform_type(value, *, field_name):
     normalized = strip_qr_prefix(value)
     if not normalized:
-        raise ValueError(f"{field_name} is required")
+        raise ExternalError("%s is required" % field_name)
     if len(normalized) > LOCAL_PLATFORM_TYPE_MAX_LENGTH:
-        raise ValueError(f"{field_name} must be shorter than 16 characters")
+        raise ExternalError("%s must be shorter than 16 characters" % field_name)
     try:
         normalized.encode("ascii")
     except UnicodeEncodeError as exc:
-        raise ValueError(f"{field_name} must be lowercase ASCII") from exc
+        raise ExternalError("%s must be lowercase ASCII" % field_name) from exc
     if not LOCAL_PLATFORM_TYPE_REGEX.fullmatch(normalized):
-        raise ValueError(
-            f"{field_name} must match {LOCAL_PLATFORM_TYPE_REGEX.pattern}"
-        )
+        raise ExternalError("%s must match %s" % (field_name, LOCAL_PLATFORM_TYPE_REGEX.pattern))
     return normalized
 
 def validate_local_platform_type(value, *, field_name):

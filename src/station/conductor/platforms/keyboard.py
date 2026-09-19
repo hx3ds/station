@@ -1,5 +1,8 @@
 import json
 
+from station.errors import ExternalError
+from station.prototypes.boundary import ext_dict
+
 TELEGRAM_CALLBACK_DATA_MAX = 64
 DISCORD_CUSTOM_ID_MAX = 100
 DISCORD_LABEL_MAX = 80
@@ -18,15 +21,15 @@ QQ_LABEL_MAX = 40
 def parse_keyboard(value):
     if value is None:
         return []
-    if isinstance(value, str):
+    if type(value) is str:
         raw = value.strip()
         if not raw:
             return []
         try:
             value = json.loads(raw)
-        except (json.JSONDecodeError, TypeError, ValueError):
-            return []
-    if isinstance(value, dict):
+        except json.JSONDecodeError:
+            raise ExternalError("keyboard JSON is invalid")
+    if type(value) is dict:
         if "rows" in value:
             return parse_keyboard(value.get("rows"))
         if "content" in value:
@@ -35,13 +38,13 @@ def parse_keyboard(value):
             return parse_keyboard(value.get("inline_keyboard"))
         btn = _parse_button(value)
         return _normalize([[btn]] if btn else [])
-    if isinstance(value, list):
+    if type(value) is list:
         rows = []
         for row in value:
             items = []
-            if isinstance(row, dict) and "buttons" in row:
+            if type(row) is dict and "buttons" in row:
                 row = row.get("buttons")
-            if isinstance(row, list):
+            if type(row) is list:
                 for item in row:
                     btn = _parse_button(item)
                     if btn:
@@ -53,11 +56,11 @@ def parse_keyboard(value):
             if items:
                 rows.append(items)
         return _normalize(rows)
-    return []
+    raise ExternalError("keyboard must be str, dict, or list")
 
 
 def is_qq_native_keyboard(value):
-    return isinstance(value, dict) and "content" in value
+    return type(value) is dict and "content" in value
 
 
 def format_keyboard_text(keyboard):
@@ -268,19 +271,23 @@ def qq_keyboard(keyboard):
 def _parse_button(value):
     if value is None:
         return None
-    if not isinstance(value, dict):
-        text = str(value).strip()
+    if type(value) is str:
+        text = value.strip()
         if not text:
             return None
         return {"text": text, "id": text, "url": ""}
+    if type(value) is not dict:
+        raise ExternalError("keyboard button must be str or dict")
     text = _first_str(value, "text", "label", "title")
     btn_id = _first_str(value, "id", "callback_data", "custom_id", "data")
     url = _first_str(value, "url")
     render = value.get("render_data")
-    if isinstance(render, dict) and not text:
+    if render is not None and not text:
+        render = ext_dict("render_data", render)
         text = _first_str(render, "label", "text")
     action = value.get("action")
-    if isinstance(action, dict):
+    if action is not None:
+        action = ext_dict("action", action)
         action_type = str(action.get("type") or "").strip()
         data = _first_str(action, "data", "url")
         if action_type == "2" and not url:

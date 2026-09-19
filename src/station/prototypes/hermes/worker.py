@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from station import logger
-from station.prototypes.boundary import ext_bool, ext_mapping_get, ext_str
+from station.prototypes.boundary import ext_bool, ext_mapping_get, ext_result_dict, ext_str
 from station.prototypes.bridge_worker import ChatBridgeState, PrototypeBridgeWorker
 from station.prototypes.voice import PrototypeVoice
 from station.prototypes.voice_policy import (
@@ -22,12 +22,16 @@ USAGE_EXHAUSTED_REPLY = (
 
 def is_usage_exhausted(*parts):
     for part in parts:
-        if isinstance(part, dict):
-            reason = str(part.get("failure_reason") or part.get("reason") or "").strip().lower()
+        if part is None:
+            continue
+        if type(part) is dict:
+            reason = ext_str("failure_reason", part.get("failure_reason") or part.get("reason")).lower()
             if reason in {"billing", "usage_exhausted"} or part.get("billing"):
                 return True
-            part = str(part.get("message") or part.get("error") or part.get("text") or "")
-        text = str(part or "").lower()
+            text = ext_str("usage message", part.get("message") or part.get("error") or part.get("text"))
+        else:
+            text = ext_str("usage part", part)
+        text = text.lower()
         if "credits" in text or "usage not enough" in text or "payment_required" in text or "spending-limit" in text:
             return True
     return False
@@ -198,9 +202,7 @@ class HermesWorker(PrototypeVoice, PrototypeBridgeWorker):
             "slash.exec",
             {"session_id": state.session_id, "command": text.strip()},
         )
-        if result is None:
-            result = {}
-        result = result if isinstance(result, dict) else {}
+        result = ext_result_dict("slash.exec result", result)
         await self._apply_slash_result(
             gateway=gateway,
             state=state,
@@ -420,7 +422,7 @@ class HermesWorker(PrototypeVoice, PrototypeBridgeWorker):
         async def transcribe(_attachment, local_path, display_name):
             gateway = await self._ensure_gateway()
             result = await gateway.request("audio.transcribe", {"file_path": local_path}, timeout_s=300.0)
-            result = result if isinstance(result, dict) else {}
+            result = ext_result_dict("audio.transcribe result", result)
             transcript = ext_mapping_get(result, "transcript", (str,), "").strip()
             if result.get("success") and transcript:
                 return transcript
@@ -464,7 +466,7 @@ class HermesWorker(PrototypeVoice, PrototypeBridgeWorker):
         output_path.parent.mkdir(parents=True, exist_ok=True)
         gateway = await self._ensure_gateway()
         result = await gateway.request("audio.synthesize", {"text": text, "output_path": str(output_path)}, timeout_s=300.0)
-        result = result if isinstance(result, dict) else {}
+        result = ext_result_dict("audio.synthesize result", result)
         if not result.get("success"):
             raise RuntimeError(ext_mapping_get(result, "error", (str,), "unknown TTS error"))
         file_path_value = ext_mapping_get(result, "file_path", (str,), None, allow_none=True)

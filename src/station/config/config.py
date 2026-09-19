@@ -3,45 +3,32 @@ import tomllib
 import re
 from dataclasses import dataclass
 
-def require_type(key, value, expected_types, *, allow_none=False):
-    if value is None:
-        if allow_none:
-            return None
-        raise TypeError("%s is required" % key)
-    if isinstance(value, bool) and int in expected_types and bool not in expected_types:
-        raise TypeError("%s must be int, got bool" % key)
-    if not isinstance(value, expected_types):
-        expected = ", ".join(t.__name__ for t in expected_types)
-        raise TypeError("%s must be %s, got %s" % (key, expected, type(value).__name__))
-    return value
+from station.errors import ExternalError
+from station.prototypes.boundary import ext_bool, ext_dict, ext_list, ext_require, ext_str, parse_env_float, parse_env_int
 
 def load_toml_file(path, label):
     if not os.path.exists(path):
-        raise FileNotFoundError("%s not found: %s" % (label, path))
+        raise ExternalError("%s not found: %s" % (label, path))
     with open(path, "rb") as f:
         data = tomllib.load(f)
-    return require_type(label, data, (dict,))
+    return ext_dict(label, data)
 
 def load_optional_toml(path, label="config file"):
     if not path:
         return {}
-    require_type(label, path, (str,))
+    ext_require(label, path, (str,))
     resolved = path if os.path.isabs(path) else os.path.abspath(path)
     return load_toml_file(resolved, label)
 
 def merge_nested(base, overlay):
     out = dict(base)
     for key, value in overlay.items():
-        if isinstance(value, dict) and isinstance(out.get(key), dict):
-            out[key] = merge_nested(out[key], value)
+        existing = out.get(key)
+        if type(value) is dict and type(existing) is dict:
+            out[key] = merge_nested(existing, value)
         else:
             out[key] = value
     return out
-
-def mapping_get(mapping, key, expected_types, default=None, *, allow_none=False):
-    if key not in mapping:
-        return default
-    return require_type(key, mapping[key], expected_types, allow_none=allow_none)
 
 @dataclass
 class ServerConfig:
@@ -71,7 +58,6 @@ class PrototypeConfig:
     id: int | None
     token: str
     kind: str = "station"
-    name: str | None = None
     config_file: str | None = None
     secret_file: str | None = None
     ava: bool = False
@@ -114,7 +100,7 @@ class Config:
         secret_from_env = (os.environ.get("STATION_SECRET_FILE") or "").strip()
         secret_from_data = self.data.get("STATION_SECRET_FILE")
         if secret_from_data is not None:
-            secret_from_data = require_type("STATION_SECRET_FILE", secret_from_data, (str,)).strip()
+            secret_from_data = ext_str("STATION_SECRET_FILE", secret_from_data)
         else:
             secret_from_data = ""
         explicit_secret_path = secret_from_arg or secret_from_env or secret_from_data or None
@@ -168,34 +154,10 @@ class Config:
         return default_value, "default"
 
     def _parse_env_int(self, key, value, *, allow_none=False):
-        if value is None:
-            if allow_none:
-                return None
-            raise TypeError(f"{key} is required")
-        stripped = value.strip()
-        if stripped == "":
-            if allow_none:
-                return None
-            raise TypeError(f"{key} is required")
-        try:
-            return int(stripped, 10)
-        except ValueError as exc:
-            raise TypeError(f"{key} must be int, got str") from exc
+        return parse_env_int(key, value, allow_none=allow_none)
 
     def _parse_env_float(self, key, value, *, allow_none=False):
-        if value is None:
-            if allow_none:
-                return None
-            raise TypeError(f"{key} is required")
-        stripped = value.strip()
-        if stripped == "":
-            if allow_none:
-                return None
-            raise TypeError(f"{key} is required")
-        try:
-            return float(stripped)
-        except ValueError as exc:
-            raise TypeError(f"{key} must be float, got str") from exc
+        return parse_env_float(key, value, allow_none=allow_none)
 
     def _parse_env_bool(self, key, value):
         stripped = value.strip().lower()
@@ -203,83 +165,83 @@ class Config:
             return True
         if stripped in ("false", "0", "no", "n", "off"):
             return False
-        raise TypeError(f"{key} must be bool, got str")
+        raise ExternalError("%s must be bool, got str" % key)
 
     def _get_str(self, key, default_value=None, *, allow_none=False):
         value, _source = self._lookup(key, default_value)
-        return require_type(key, value, (str,), allow_none=allow_none)
+        return ext_require(key, value, (str,), allow_none=allow_none)
 
     def _get_int(self, key, default_value=None, *, allow_none=False):
         value, source = self._lookup(key, default_value)
         if source == "env":
             return self._parse_env_int(key, value, allow_none=allow_none)
-        return require_type(key, value, (int,), allow_none=allow_none)
+        return ext_require(key, value, (int,), allow_none=allow_none)
 
     def _get_float(self, key, default_value=None, *, allow_none=False):
         value, source = self._lookup(key, default_value)
         if source == "env":
             return self._parse_env_float(key, value, allow_none=allow_none)
-        return require_type(key, value, (float,), allow_none=allow_none)
+        return ext_require(key, value, (float,), allow_none=allow_none)
 
     def _get_bool(self, key, default_value=False):
         value, source = self._lookup(key, default_value)
         if source == "env":
             return self._parse_env_bool(key, value)
-        return require_type(key, value, (bool,))
+        return ext_require(key, value, (bool,))
 
     def _load_server_config(self):
         request_dedupe_ttl_seconds = self._get_int("REQUEST_DEDUPE_TTL_SECONDS", 3600)
         if request_dedupe_ttl_seconds <= 0:
-            raise ValueError("REQUEST_DEDUPE_TTL_SECONDS must be > 0")
+            raise ExternalError("REQUEST_DEDUPE_TTL_SECONDS must be > 0")
 
         dedupe_cleanup_interval_seconds = self._get_int("DEDUPE_CLEANUP_INTERVAL_SECONDS", 600)
         if dedupe_cleanup_interval_seconds <= 0:
-            raise ValueError("DEDUPE_CLEANUP_INTERVAL_SECONDS must be > 0")
+            raise ExternalError("DEDUPE_CLEANUP_INTERVAL_SECONDS must be > 0")
 
         inbound_workers = self._get_int("STATION_INBOUND_WORKERS", 4)
         if inbound_workers <= 0:
-            raise ValueError("STATION_INBOUND_WORKERS must be > 0")
+            raise ExternalError("STATION_INBOUND_WORKERS must be > 0")
 
         inbound_queue = self._get_int("STATION_INBOUND_QUEUE", 16384)
         if inbound_queue <= 0:
-            raise ValueError("STATION_INBOUND_QUEUE must be > 0")
+            raise ExternalError("STATION_INBOUND_QUEUE must be > 0")
 
         inbound_batch = self._get_int("STATION_INBOUND_BATCH", 8)
         if inbound_batch <= 0:
-            raise ValueError("STATION_INBOUND_BATCH must be > 0")
+            raise ExternalError("STATION_INBOUND_BATCH must be > 0")
 
         outbound_concurrency = self._get_int("STATION_OUTBOUND_CONCURRENCY", 0)
         if outbound_concurrency < 0:
-            raise ValueError("STATION_OUTBOUND_CONCURRENCY must be >= 0")
+            raise ExternalError("STATION_OUTBOUND_CONCURRENCY must be >= 0")
 
         listen_backlog = self._get_int("STATION_LISTEN_BACKLOG", 4096)
         if listen_backlog <= 0:
-            raise ValueError("STATION_LISTEN_BACKLOG must be > 0")
+            raise ExternalError("STATION_LISTEN_BACKLOG must be > 0")
 
         inbound_at_least_once = self._get_bool("STATION_INBOUND_AT_LEAST_ONCE", False)
 
         isolate_after = self._get_int("STATION_INSTANCE_ISOLATE_AFTER", 3)
         if isolate_after <= 0:
-            raise ValueError("STATION_INSTANCE_ISOLATE_AFTER must be > 0")
+            raise ExternalError("STATION_INSTANCE_ISOLATE_AFTER must be > 0")
 
         outbound_retry_attempts = self._get_int("STATION_OUTBOUND_RETRY_ATTEMPTS", 3)
         if outbound_retry_attempts < 0:
-            raise ValueError("STATION_OUTBOUND_RETRY_ATTEMPTS must be >= 0")
+            raise ExternalError("STATION_OUTBOUND_RETRY_ATTEMPTS must be >= 0")
 
         outbound_retry_base_seconds = self._get_float("STATION_OUTBOUND_RETRY_BASE_SECONDS", 0.5)
         if outbound_retry_base_seconds <= 0:
-            raise ValueError("STATION_OUTBOUND_RETRY_BASE_SECONDS must be > 0")
+            raise ExternalError("STATION_OUTBOUND_RETRY_BASE_SECONDS must be > 0")
 
         outbound_circuit_failures = self._get_int("STATION_OUTBOUND_CIRCUIT_FAILURES", 5)
         if outbound_circuit_failures <= 0:
-            raise ValueError("STATION_OUTBOUND_CIRCUIT_FAILURES must be > 0")
+            raise ExternalError("STATION_OUTBOUND_CIRCUIT_FAILURES must be > 0")
 
         outbound_circuit_cooldown_seconds = self._get_float(
             "STATION_OUTBOUND_CIRCUIT_COOLDOWN_SECONDS",
             1.0,
         )
         if outbound_circuit_cooldown_seconds <= 0:
-            raise ValueError("STATION_OUTBOUND_CIRCUIT_COOLDOWN_SECONDS must be > 0")
+            raise ExternalError("STATION_OUTBOUND_CIRCUIT_COOLDOWN_SECONDS must be > 0")
 
         return ServerConfig(
             request_dedupe_ttl_seconds=request_dedupe_ttl_seconds,
@@ -300,7 +262,7 @@ class Config:
     def _load_database_config(self):
         backend = self._get_str("DB_BACKEND", "sqlite").strip().lower()
         if backend not in ("sqlite", "postgres"):
-            raise ValueError("DB_BACKEND must be either 'sqlite' or 'postgres'")
+            raise ExternalError("DB_BACKEND must be either 'sqlite' or 'postgres'")
         return DatabaseConfig(
             backend=backend,
             path=self._get_str("DB_PATH", "prototype.db"),
@@ -314,32 +276,22 @@ class Config:
         return default
 
     def _parse_prototype_entry(self, raw, *, label: str) -> PrototypeConfig:
-        raw = require_type(label, raw, (dict,))
-        p_id = require_type(
+        raw = ext_dict(label, raw)
+        p_id = ext_require(
             f"{label}.id",
             self._field_or_default(raw, "id", None),
             (int,),
             allow_none=True,
         )
-        token = require_type(
+        token = ext_str(
             f"{label}.token",
             self._field_or_default(raw, "token", ""),
-            (str,),
-        ).strip()
-        kind = require_type(
+        )
+        kind = ext_str(
             f"{label}.kind",
             self._field_or_default(raw, "kind", "station"),
-            (str,),
-        ).strip() or "station"
-        name = require_type(
-            f"{label}.name",
-            self._field_or_default(raw, "name", None),
-            (str,),
-            allow_none=True,
-        )
-        if name is not None:
-            name = name.strip() or None
-        config_file = require_type(
+        ) or "station"
+        config_file = ext_require(
             f"{label}.config_file",
             self._field_or_default(raw, "config_file", None),
             (str,),
@@ -347,7 +299,7 @@ class Config:
         )
         if config_file is not None:
             config_file = config_file.strip() or None
-        secret_file = require_type(
+        secret_file = ext_require(
             f"{label}.secret_file",
             self._field_or_default(raw, "secret_file", None),
             (str,),
@@ -355,21 +307,18 @@ class Config:
         )
         if secret_file is not None:
             secret_file = secret_file.strip() or None
-        ava = require_type(
+        ava = ext_bool(
             f"{label}.ava",
             self._field_or_default(raw, "ava", False),
-            (bool,),
         )
-        reply_to = require_type(
+        reply_to = ext_bool(
             f"{label}.reply_to",
             self._field_or_default(raw, "reply_to", False),
-            (bool,),
         )
         return PrototypeConfig(
             id=p_id,
             token=token,
             kind=kind,
-            name=name,
             config_file=config_file,
             secret_file=secret_file,
             ava=ava,
@@ -379,10 +328,10 @@ class Config:
     def _load_prototype_configs(self) -> list[PrototypeConfig]:
         raw_list = self.data.get("prototypes")
         if raw_list is None:
-            raise ValueError("At least one [[prototypes]] entry is required")
-        raw_list = require_type("prototypes", raw_list, (list,))
+            raise ExternalError("At least one [[prototypes]] entry is required")
+        raw_list = ext_list("prototypes", raw_list)
         if not raw_list:
-            raise ValueError("At least one [[prototypes]] entry is required")
+            raise ExternalError("At least one [[prototypes]] entry is required")
 
         hosted: list[PrototypeConfig] = []
         for i, entry in enumerate(raw_list):
@@ -392,20 +341,20 @@ class Config:
         seen_tokens: set[str] = set()
         for cfg in hosted:
             if cfg.id is None:
-                raise ValueError("Each prototype tenant requires an id")
+                raise ExternalError("Each prototype tenant requires an id")
             if not cfg.token.strip():
-                raise ValueError(f"prototype_id={cfg.id} requires a non-empty token")
+                raise ExternalError("prototype_id=%s requires a non-empty token" % cfg.id)
             pid = cfg.id
             token = cfg.token.strip()
             if pid in seen_ids:
-                raise ValueError(f"Duplicate prototype id: {pid}")
+                raise ExternalError("Duplicate prototype id: %s" % pid)
             if token in seen_tokens:
-                raise ValueError(f"Duplicate prototype token for prototype_id={pid}")
+                raise ExternalError("Duplicate prototype token for prototype_id=%s" % pid)
             seen_ids.add(pid)
             seen_tokens.add(token)
             cfg.kind = cfg.kind.strip()
             if not cfg.kind:
-                raise ValueError(f"prototype_id={cfg.id} requires a non-empty kind")
+                raise ExternalError("prototype_id=%s requires a non-empty kind" % cfg.id)
 
         return hosted
 
@@ -422,15 +371,15 @@ class Config:
 
         max_bytes = self._get_int("LOG_MAX_BYTES", 10485760)
         if max_bytes <= 0:
-            raise ValueError("LOG_MAX_BYTES must be > 0")
+            raise ExternalError("LOG_MAX_BYTES must be > 0")
 
         backup_count = self._get_int("LOG_BACKUP_COUNT", 5)
         if backup_count < 0:
-            raise ValueError("LOG_BACKUP_COUNT must be >= 0")
+            raise ExternalError("LOG_BACKUP_COUNT must be >= 0")
 
         smoothing_window = self._get_int("SMOOTHING_WINDOW", 100)
         if smoothing_window <= 0:
-            raise ValueError("SMOOTHING_WINDOW must be > 0")
+            raise ExternalError("SMOOTHING_WINDOW must be > 0")
 
         return RecorderConfig(
             dir_path=dir_path,
@@ -444,25 +393,22 @@ class Config:
     def _load_local_conductor_config(self):
         private = ""
         if "LOCAL_CONDUCTOR_PRIVATE_KEY_PATH" in self.data:
-            private = require_type(
+            private = ext_str(
                 "LOCAL_CONDUCTOR_PRIVATE_KEY_PATH",
                 self.data["LOCAL_CONDUCTOR_PRIVATE_KEY_PATH"],
-                (str,),
-            ).strip()
+            )
         public = ""
         if "LOCAL_CONDUCTOR_PUBLIC_KEY_PATH" in self.data:
-            public = require_type(
+            public = ext_str(
                 "LOCAL_CONDUCTOR_PUBLIC_KEY_PATH",
                 self.data["LOCAL_CONDUCTOR_PUBLIC_KEY_PATH"],
-                (str,),
-            ).strip()
+            )
         address = ""
         if "LOCAL_CONDUCTOR_ADDRESS" in self.data:
-            address = require_type(
+            address = ext_str(
                 "LOCAL_CONDUCTOR_ADDRESS",
                 self.data["LOCAL_CONDUCTOR_ADDRESS"],
-                (str,),
-            ).strip()
+            )
         private = self._resolve_repo_path(private)
         public = self._resolve_repo_path(public)
         if private and not public:
@@ -474,7 +420,7 @@ class Config:
         )
 
     def _parse_access_point_host_port(self, access_point):
-        access_point = require_type("access_point", access_point, (str,))
+        access_point = ext_str("access_point", access_point, strip=False)
         if access_point.startswith("http://"):
             access_point = access_point[7:]
         elif access_point.startswith("https://"):

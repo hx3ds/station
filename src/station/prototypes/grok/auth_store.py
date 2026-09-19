@@ -1,7 +1,8 @@
 import json
 import os
 
-from station.prototypes.boundary import ext_dict, ext_int, ext_str
+from station.errors import ExternalError
+from station.prototypes.boundary import ext_dict, ext_float, ext_int, ext_str
 from station.prototypes.fs_paths import sanitize_path_component, write_atomic
 
 from .oauth import OAuthCredentials, XAI_OAUTH_CLIENT_ID, XAI_OAUTH_ISSUER
@@ -17,9 +18,9 @@ def _credentials_from_dict(data, *, label):
     access = ext_str("%s.access" % label, data.get("access"))
     refresh = ext_str("%s.refresh" % label, data.get("refresh"))
     if not access:
-        raise TypeError("%s.access must be non-empty str" % label)
+        raise ExternalError("%s.access must be non-empty str" % label)
     if not refresh:
-        raise TypeError("%s.refresh must be non-empty str" % label)
+        raise ExternalError("%s.refresh must be non-empty str" % label)
     expires = data.get("expires", 0)
     expires = ext_int("%s.expires" % label, expires, default=0, allow_none=True)
     if expires is None:
@@ -77,14 +78,11 @@ def load_grok_cli_credentials():
     access = ext_str("grok cli access_token", entry.get("access_token"))
     refresh = ext_str("grok cli refresh_token", entry.get("refresh_token"))
     if not access:
-        raise TypeError("grok cli access_token must be non-empty str")
+        raise ExternalError("grok cli access_token must be non-empty str")
     if not refresh:
-        raise TypeError("grok cli refresh_token must be non-empty str")
+        raise ExternalError("grok cli refresh_token must be non-empty str")
     expires_at = entry.get("expires_at", 0)
-    if type(expires_at) is bool:
-        raise TypeError("grok cli expires_at must be int or float")
-    if type(expires_at) not in (int, float):
-        raise TypeError("grok cli expires_at must be int or float")
+    expires_at = ext_float("grok cli expires_at", expires_at)
     expires = int(expires_at * 1000) if expires_at < 10_000_000_000 else int(expires_at)
     return OAuthCredentials(
         access=access,

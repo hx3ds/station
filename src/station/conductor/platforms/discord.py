@@ -12,7 +12,8 @@ from station.conductor.platforms import guidance
 from station.conductor.platforms.keyboard import discord_components, parse_keyboard
 from station.conductor.util import attachment_type_from_meta, ext_bool, ext_id, ext_int, ext_str
 from station import logger
-from station.prototypes.boundary import ext_dict, ext_float, ext_list, ext_require
+from station.errors import ExternalError
+from station.prototypes.boundary import ext_dict, ext_list
 
 _THREAD_CHANNEL_TYPES = {10, 11, 12}
 
@@ -121,7 +122,7 @@ class DiscordIO:
 
     def _acct_state(self, acct_id: str) -> _DiscordAcctState:
         if not acct_id:
-            raise ValueError("discord acct_id required")
+            raise ExternalError("discord acct_id required")
         st = self._accounts.get(acct_id)
         if st is None:
             st = _DiscordAcctState()

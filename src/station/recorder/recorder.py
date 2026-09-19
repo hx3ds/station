@@ -1,4 +1,3 @@
-import contextlib
 import logging
 import os
 import sys
@@ -8,6 +7,9 @@ from datetime import datetime, timezone
 from logging.handlers import RotatingFileHandler
 
 from aiohttp import web
+
+from station.api.http import external_response, log_caught
+from station.errors import ExternalError
 
 from .context import request_id_var
 
@@ -29,7 +31,7 @@ class TZFormatter(logging.Formatter):
 def bootstrap_logger(name="station"):
     level_name = (os.getenv("LOG_LEVEL") or "INFO").upper()
     if level_name not in _VALID_LEVELS:
-        raise ValueError("Invalid LOG_LEVEL: %s" % level_name)
+        raise ExternalError("Invalid LOG_LEVEL: %s" % level_name)
     root = logging.getLogger()
     if not root.handlers:
         formatter = TZFormatter(
@@ -50,14 +52,12 @@ class Recorder:
         self.config = config
         self.path_stats = {}
         self.logger = logging.getLogger(self.name)
-        self.log_dir_path = None
-        self.log_file_path = None
         self._setup_logging()
 
     def _setup_logging(self):
         log_level = self.config.level.upper()
         if log_level not in _VALID_LEVELS:
-            raise ValueError("Invalid log level: %s" % self.config.level)
+            raise ExternalError("Invalid log level: %s" % self.config.level)
         formatter = TZFormatter(self.config.format)
         request_id_filter = RequestIdFilter()
 
@@ -76,8 +76,6 @@ class Recorder:
             os.makedirs(dir_path, exist_ok=True)
             file_name = "%s-%s.log" % (self.base_name, self.port) if self.port else "%s.log" % self.base_name
             file_path = os.path.join(dir_path, file_name)
-            self.log_dir_path = os.path.abspath(dir_path)
-            self.log_file_path = os.path.abspath(file_path)
             file_handler = RotatingFileHandler(
                 file_path,
                 maxBytes=self.config.max_bytes,
@@ -94,7 +92,7 @@ class Recorder:
     def set_log_level(self, level_name):
         level = level_name.upper()
         if level not in _VALID_LEVELS:
-            raise ValueError("Invalid log level: %s" % level_name)
+            raise ExternalError("Invalid log level: %s" % level_name)
         logging.getLogger().setLevel(level)
         self.logger.setLevel(level)
         self.config.level = level
@@ -240,45 +238,9 @@ class Recorder:
             return await handler(request)
         except web.HTTPException:
             raise
+        except ExternalError as e:
+            return external_response(e)
         except Exception as e:
             request["error_logged"] = True
-            where = "%s %s" % (request.method, request.path)
-            self.logger.error("unexpected where=%s error=%s", where, e, exc_info=e)
+            log_caught(self.logger, e, where="%s %s" % (request.method, request.path))
             return web.json_response({"result": 1, "msg": "Internal error"}, status=500)
-
-    @contextlib.asynccontextmanager
-    async def record(self, name):
-        start_time = time.perf_counter()
-        n = self.smoothing_window
-        if name not in self.path_stats:
-            self.path_stats[name] = {
-                "avg_duration": 0.0,
-                "avg_interval": 0.0,
-                "last_request_time": start_time,
-                "status_codes": {},
-                "total_requests": 0,
-                "current_concurrency": 1,
-                "max_concurrency": 1,
-                "avg_request_size": 0.0,
-                "avg_response_size": 0.0,
-            }
-        stats = self.path_stats[name]
-        interval = start_time - stats["last_request_time"]
-        stats["last_request_time"] = start_time
-        if stats["avg_interval"] == 0:
-            stats["avg_interval"] = interval
-        else:
-            stats["avg_interval"] = stats["avg_interval"] * (n - 1) / n + interval / n
-        stats["current_concurrency"] += 1
-        if stats["current_concurrency"] > stats["max_concurrency"]:
-            stats["max_concurrency"] = stats["current_concurrency"]
-        try:
-            yield
-        finally:
-            duration = time.perf_counter() - start_time
-            stats["total_requests"] += 1
-            stats["current_concurrency"] -= 1
-            if stats["avg_duration"] == 0:
-                stats["avg_duration"] = duration
-            else:
-                stats["avg_duration"] = stats["avg_duration"] * (n - 1) / n + duration / n

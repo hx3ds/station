@@ -25,11 +25,6 @@ class SessionEventBus:
         if event.session_id:
             await self.queue(event.session_id).put(event)
 
-    async def broadcast(self, event_type, payload=None):
-        payload = dict(payload or {})
-        for sid in list(self._queues):
-            await self.queue(sid).put(SessionEvent(type=event_type, session_id=sid, payload=dict(payload)))
-
     def drop_queued(self, session_id):
         queue = self._queues.get(session_id)
         if queue is None:

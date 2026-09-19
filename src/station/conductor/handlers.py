@@ -9,6 +9,7 @@ from aiohttp import web
 from aiohttp.web_request import FileField
 from cryptography.hazmat.primitives.asymmetric import rsa
 
+from station.api.http import ext_path_int, read_json_object
 from station.api.reception import is_slash_command
 from station.conductor.crypto import default_private_key_path, decrypt_if_encrypted, load_private_key, public_key_token, write_private_key
 from station.conductor.platform_types import (
@@ -18,9 +19,10 @@ from station.conductor.platform_types import (
 )
 from station.conductor.platforms import LocalPlatformAdapter, build_builtin_platforms
 from station.conductor.pair import PairManager
-from station.conductor.util import constant_time_equal, err, ext_bool, ext_int, ext_str, ok
+from station.conductor.util import constant_time_equal, err, ext_bool, ext_int, ext_str, ok, catch_external
+from station.errors import ExternalError
 from station import logger
-from station.prototypes.boundary import ext_dict, ext_float, ext_list, ext_require
+from station.prototypes.boundary import ext_dict, ext_list
 
 _MEDIA_METHODS = {
     "send_photo",
@@ -57,10 +59,6 @@ class LocalConductor:
 
         self.platforms: dict[str, LocalPlatformAdapter] = build_builtin_platforms(self)
         self.pair_manager = PairManager(self)
-
-    @property
-    def enabled(self) -> bool:
-        return self.app["prototype_is_local"]
 
     def require_own_prototype(self, prototype_id: int) -> web.Response | None:
         registry = self.app["tenants"]
@@ -193,20 +191,16 @@ class LocalConductor:
                 raw_content = payload.get("webrtc_content")
                 if raw_content is None:
                     content_obj = {}
-                elif isinstance(raw_content, dict):
-                    content_obj = raw_content
-                elif isinstance(raw_content, str):
+                elif type(raw_content) is dict:
+                    content_obj = ext_dict("webrtc_content", raw_content)
+                elif type(raw_content) is str:
                     try:
                         parsed = json.loads(raw_content)
-                    except (json.JSONDecodeError, TypeError, ValueError):
-                        return err("Invalid webrtc_content", status=400)
-                    try:
-                        parsed = ext_dict('parsed', parsed)
-                    except TypeError:
-                        return err("Invalid webrtc_content", status=400)
-                    content_obj = parsed
+                    except (json.JSONDecodeError, ValueError):
+                        raise ExternalError("Invalid webrtc_content")
+                    content_obj = ext_dict("webrtc_content", parsed)
                 else:
-                    return err("Invalid webrtc_content", status=400)
+                    raise ExternalError("Invalid webrtc_content")
                 if not webrtc_type:
                     return err("Missing webrtc_type", status=400)
                 ok_ = await adapter.send_webrtc(
@@ -254,7 +248,7 @@ class LocalConductor:
                     reply_to=reply_to,
                 )
                 return ok({"ok": ok_}) if ok_ else err("send failed", status=502)
-        except TypeError as exc:
+        except ExternalError as exc:
             return err(str(exc), status=400)
 
         return err("Unsupported gateway method", status=501)
@@ -304,8 +298,8 @@ class LocalConductor:
         if raw is None or raw == "":
             return False
         try:
-            incoming = int(raw)
-        except ValueError:
+            incoming = ext_path_int("X-Prototype-Version", raw)
+        except ExternalError:
             return False
         stored = (await self.db.get_prototype_info(prototype_id)) if prototype_id else None
         local = 0
@@ -422,7 +416,7 @@ class LocalConductor:
                 strip_qr_prefix(base_type),
                 field_name="chat_type",
             )
-        except ValueError:
+        except ExternalError:
             return None
         model_id = acct.get("model_id")
         if model_id is None:
@@ -483,7 +477,7 @@ class LocalConductor:
             from station.api.instances import isolate_instance
             try:
                 await instance.start()
-            except ValueError:
+            except ExternalError:
                 await isolate_instance(self.app, model_id, instance)
                 return None
             except Exception as e:
@@ -594,7 +588,6 @@ class LocalConductor:
             chat_id=chat_id,
             acct_id=acct_id,
             request_id=None,
-            event_level="chat",
         )
 
     async def _maybe_auto_join_discord_voice(
@@ -724,22 +717,11 @@ class LocalConductor:
                 else:
                     payload[k] = v
             return payload, file_bytes
-        try:
-            body = await request.json()
-        except (json.JSONDecodeError, ValueError, TypeError) as exc:
-            raise ValueError("Invalid JSON body") from exc
-        try:
-            body = ext_dict("body", body)
-        except TypeError as exc:
-            raise ValueError("Invalid JSON body") from exc
-        return body, None
+        return await read_json_object(request), None
 
     async def _poller_reconcile_loop(self) -> None:
         while not self.poller_stop.is_set():
             try:
-                if not self.enabled:
-                    await asyncio.sleep(5)
-                    continue
                 self.ensure_keys()
                 desired: dict[str, LocalPlatformAdapter] = {}
                 grouped_accounts: dict[str, list[dict]] = {}
@@ -840,10 +822,7 @@ class LocalConductor:
             prototype_id_raw = ""
         model_id_raw = request.match_info.get("model_id")
         model_id = model_id_raw.strip() if model_id_raw is not None else ""
-        try:
-            prototype_id = int(prototype_id_raw)
-        except ValueError:
-            return err("Invalid prototype_id", status=400)
+        prototype_id = ext_path_int("prototype_id", prototype_id_raw)
         mismatch = self.require_own_prototype(prototype_id)
         if mismatch is not None:
             return mismatch
@@ -870,7 +849,7 @@ class LocalConductor:
                 acct_id = a.get("acct_id")
                 acct_id = ext_str(acct_id, 'acct_id', default="")
                 if not acct_id:
-                    raise TypeError("acct_id must be non-empty str")
+                    raise ExternalError("acct_id must be non-empty str")
                 acct_id = acct_id.strip()
                 acct_type = a.get("acct_type")
                 if acct_type is None:
@@ -893,7 +872,7 @@ class LocalConductor:
             chats = await self.fetch_model_chats_from_consul(model_id=model_id)
             if chats is not None:
                 await self.db.replace_model_chats(model_id=model_id, prototype_id=prototype_id, chats=chats)
-        except (ValueError, TypeError) as exc:
+        except ExternalError as exc:
             return err(str(exc), status=400)
 
         await self._ensure_instance(model_id=model_id, prototype_id=prototype_id, settings=remote_settings)
@@ -908,10 +887,7 @@ class LocalConductor:
             prototype_id_raw = ""
         model_id_raw = request.match_info.get("model_id")
         model_id = model_id_raw.strip() if model_id_raw is not None else ""
-        try:
-            prototype_id = int(prototype_id_raw)
-        except ValueError:
-            return err("Invalid prototype_id", status=400)
+        prototype_id = ext_path_int("prototype_id", prototype_id_raw)
         mismatch = self.require_own_prototype(prototype_id)
         if mismatch is not None:
             return mismatch
@@ -942,14 +918,7 @@ class LocalConductor:
         model_id = model_id_raw.strip() if model_id_raw is not None else ""
         if not acct_id:
             return err("Missing acct_id", status=400)
-        try:
-            body = await request.json()
-        except (json.JSONDecodeError, ValueError, TypeError):
-            return err("Invalid JSON body", status=400)
-        try:
-            body = ext_dict('body', body)
-        except TypeError:
-            return err("Invalid JSON body", status=400)
+        body = await read_json_object(request)
         prototype_id = None
         remote_acct_ids = set()
         if model_id:
@@ -997,7 +966,7 @@ class LocalConductor:
                 encrypted_token=ext_str(body.get("acct_token"), "acct_token").strip(),
                 is_local=True,
             )
-        except (ValueError, TypeError) as exc:
+        except ExternalError as exc:
             return err(str(exc), status=400)
         if model_id:
             keep = set(remote_acct_ids)
@@ -1019,7 +988,7 @@ class LocalConductor:
             await adapter.ensure_account_ready(acct_id)
         try:
             want_otp = ext_bool(body.get("otp"), "otp")
-        except TypeError as exc:
+        except ExternalError as exc:
             return err(str(exc), status=400)
         if want_otp:
             otp = "%06d" % (uuid.uuid4().int % 1000000)
@@ -1059,33 +1028,23 @@ class LocalConductor:
             prototype_id_raw = ""
         model_id_raw = request.match_info.get("model_id")
         model_id = model_id_raw.strip() if model_id_raw is not None else ""
-        try:
-            prototype_id = int(prototype_id_raw)
-        except ValueError:
-            return err("Invalid prototype_id", status=400)
+        prototype_id = ext_path_int("prototype_id", prototype_id_raw)
         mismatch = self.require_own_prototype(prototype_id)
         if mismatch is not None:
             return mismatch
         if not model_id:
             return err("Missing model_id", status=400)
-        try:
-            body = await request.json()
-        except (json.JSONDecodeError, ValueError, TypeError):
-            return err("Invalid JSON body", status=400)
-        try:
-            body = ext_dict('body', body)
-        except TypeError:
-            return err("Invalid JSON body", status=400)
+        body = await read_json_object(request)
         chats = body.get("chats")
         if chats is None:
             chats = []
         try:
             chats = ext_list('chats', chats)
-        except TypeError:
+        except ExternalError:
             return err("Invalid chats", status=400)
         try:
             await self.db.replace_model_chats(model_id=model_id, prototype_id=prototype_id, chats=chats)
-        except (ValueError, TypeError) as exc:
+        except ExternalError as exc:
             return err(str(exc), status=400)
         return ok({"ok": True})
 
@@ -1099,17 +1058,10 @@ class LocalConductor:
         model_id = model_id_raw.strip() if model_id_raw is not None else ""
         if not chat_id or not model_id:
             return err("Invalid path", status=400)
-        try:
-            body = await request.json()
-        except (json.JSONDecodeError, ValueError, TypeError):
-            return err("Invalid JSON body", status=400)
-        try:
-            body = ext_dict('body', body)
-        except TypeError:
-            return err("Invalid JSON body", status=400)
+        body = await read_json_object(request)
         try:
             acct_id = ext_str(body.get("acct_id"), "acct_id").strip()
-        except TypeError as exc:
+        except ExternalError as exc:
             return err(str(exc), status=400)
         if not acct_id:
             return err("Missing acct_id", status=400)
@@ -1129,21 +1081,11 @@ class LocalConductor:
         prototype_id_raw = request.match_info.get("prototype_id")
         if prototype_id_raw is None:
             prototype_id_raw = ""
-        try:
-            prototype_id = int(prototype_id_raw)
-        except ValueError:
-            return err("Invalid prototype_id", status=400)
+        prototype_id = ext_path_int("prototype_id", prototype_id_raw)
         mismatch = self.require_own_prototype(prototype_id)
         if mismatch is not None:
             return mismatch
-        try:
-            body = await request.json()
-        except (json.JSONDecodeError, ValueError, TypeError):
-            return err("Invalid JSON body", status=400)
-        try:
-            body = ext_dict('body', body)
-        except TypeError:
-            return err("Invalid JSON body", status=400)
+        body = await read_json_object(request)
         stored_row = await self.db.get_prototype_info(prototype_id)
         stored = dict(stored_row) if stored_row is not None else {}
         updated = dict(stored)
@@ -1196,10 +1138,7 @@ class LocalConductor:
         model_id = model_id_raw.strip() if model_id_raw is not None else ""
         acct_id_raw = request.match_info.get("acct_id")
         acct_id = acct_id_raw.strip() if acct_id_raw is not None else ""
-        try:
-            prototype_id = int(prototype_id_raw)
-        except ValueError:
-            return err("Invalid prototype_id", status=400)
+        prototype_id = ext_path_int("prototype_id", prototype_id_raw)
         mismatch = self.require_own_prototype(prototype_id)
         if mismatch is not None:
             return mismatch
@@ -1224,21 +1163,14 @@ class LocalConductor:
         unauthorized = self.require_consul_token(request)
         if unauthorized is not None:
             return unauthorized
-        try:
-            body = await request.json()
-        except (json.JSONDecodeError, ValueError, TypeError):
-            return err("Invalid JSON body", status=400)
-        try:
-            body = ext_dict('body', body)
-        except TypeError:
-            return err("Invalid JSON body", status=400)
+        body = await read_json_object(request)
         try:
             data = await self.pair_manager.start(
                 acct_id=ext_str(body.get("acct_id"), "acct_id").strip(),
                 platform=ext_str(body.get("platform"), "platform").strip(),
                 qr_timeout_ms=body.get("qr_timeout_ms"),
             )
-        except (ValueError, TypeError) as exc:
+        except ExternalError as exc:
             return err(str(exc), status=400)
         return ok(data)
 
@@ -1246,20 +1178,13 @@ class LocalConductor:
         unauthorized = self.require_consul_token(request)
         if unauthorized is not None:
             return unauthorized
-        try:
-            body = await request.json()
-        except (json.JSONDecodeError, ValueError, TypeError):
-            return err("Invalid JSON body", status=400)
-        try:
-            body = ext_dict('body', body)
-        except TypeError:
-            return err("Invalid JSON body", status=400)
+        body = await read_json_object(request)
         try:
             data = await self.pair_manager.status(
                 acct_id=ext_str(body.get("acct_id"), "acct_id").strip(),
                 platform=ext_str(body.get("platform"), "platform").strip(),
             )
-        except TypeError as exc:
+        except ExternalError as exc:
             return err(str(exc), status=400)
         return ok(data)
 
@@ -1267,20 +1192,13 @@ class LocalConductor:
         unauthorized = self.require_consul_token(request)
         if unauthorized is not None:
             return unauthorized
-        try:
-            body = await request.json()
-        except (json.JSONDecodeError, ValueError, TypeError):
-            return err("Invalid JSON body", status=400)
-        try:
-            body = ext_dict('body', body)
-        except TypeError:
-            return err("Invalid JSON body", status=400)
+        body = await read_json_object(request)
         try:
             data = await self.pair_manager.cancel(
                 acct_id=ext_str(body.get("acct_id"), "acct_id").strip(),
                 platform=ext_str(body.get("platform"), "platform").strip(),
             )
-        except TypeError as exc:
+        except ExternalError as exc:
             return err(str(exc), status=400)
         return ok(data)
 
@@ -1295,7 +1213,7 @@ class LocalConductor:
             return dict(settings)
         try:
             enc = ext_str(enc, "__enc__", default="")
-        except TypeError:
+        except ExternalError:
             return dict(settings)
         if not enc:
             return dict(settings)
@@ -1319,10 +1237,7 @@ class LocalConductor:
         model_id = model_id_raw.strip() if model_id_raw is not None else ""
         acct_id_raw = request.match_info.get("acct_id")
         acct_id = acct_id_raw.strip() if acct_id_raw is not None else ""
-        try:
-            prototype_id = int(prototype_id_raw)
-        except ValueError:
-            return err("Invalid prototype_id", status=400)
+        prototype_id = ext_path_int("prototype_id", prototype_id_raw)
         mismatch = self.require_own_prototype(prototype_id)
         if mismatch is not None:
             return mismatch
@@ -1338,7 +1253,7 @@ class LocalConductor:
             return err("Acct token decrypt failed", status=500)
         try:
             payload, file_bytes = await self._parse_body_and_file(request)
-        except ValueError as exc:
+        except ExternalError as exc:
             return err(str(exc), status=400)
         payload.pop("acct_id", None)
         payload.pop("chat_id", None)
@@ -1369,10 +1284,7 @@ class LocalConductor:
             prototype_id_raw = ""
         model_id_raw = request.match_info.get("model_id")
         model_id = model_id_raw.strip() if model_id_raw is not None else ""
-        try:
-            prototype_id = int(prototype_id_raw)
-        except ValueError:
-            return err("Invalid prototype_id", status=400)
+        prototype_id = ext_path_int("prototype_id", prototype_id_raw)
         mismatch = self.require_own_prototype(prototype_id)
         if mismatch is not None:
             return mismatch
@@ -1383,11 +1295,11 @@ class LocalConductor:
 
         try:
             payload, file_bytes = await self._parse_body_and_file(request)
-        except ValueError as exc:
+        except ExternalError as exc:
             return err(str(exc), status=400)
         try:
             preferred_acct_id = ext_str(payload.get("acct_id"), "acct_id").strip()
-        except TypeError as exc:
+        except ExternalError as exc:
             return err(str(exc), status=400)
         acct_id = await self._resolve_reply_acct_id(
             model_id=model_id,
@@ -1480,8 +1392,6 @@ class LocalConductor:
         files=None,
         use_gateway=False,
     ):
-        if not self.enabled:
-            return False
         method = method.strip() if method else ""
         model_id = model_id.strip() if model_id else ""
         chat_id = chat_id.strip() if chat_id else ""
@@ -1557,7 +1467,6 @@ def ensure_local_conductor(app: web.Application):
     if existing is None:
         app["local_conductor"] = LocalConductor(app)
         existing = app["local_conductor"]
-    app["prototype_is_local"] = True
     existing.ensure_keys()
     if not app.get("_local_conductor_routes"):
         setup_local_conductor_routes(app)
@@ -1566,24 +1475,24 @@ def ensure_local_conductor(app: web.Application):
 
 def setup_local_conductor_routes(app: web.Application) -> None:
     lc: LocalConductor = app["local_conductor"]
-    app.router.add_post("/consul/ping", lc.handle_consul_ping)
-    app.router.add_post("/consul/info", lc.handle_consul_info)
-    app.router.add_post("/pair/start", lc.handle_pair_start)
-    app.router.add_post("/pair/status", lc.handle_pair_status)
-    app.router.add_post("/pair/cancel", lc.handle_pair_cancel)
+    app.router.add_post("/consul/ping", catch_external(lc.handle_consul_ping))
+    app.router.add_post("/consul/info", catch_external(lc.handle_consul_info))
+    app.router.add_post("/pair/start", catch_external(lc.handle_pair_start))
+    app.router.add_post("/pair/status", catch_external(lc.handle_pair_status))
+    app.router.add_post("/pair/cancel", catch_external(lc.handle_pair_cancel))
     for adapter in lc.platforms.values():
         adapter.register_routes(app)
-    app.router.add_post("/model/create/{prototype_id}/{model_id}", lc.handle_model_create)
-    app.router.add_post("/model/remove/{prototype_id}/{model_id}", lc.handle_model_remove)
-    app.router.add_post("/model/remove_chat/{chat_id}/{model_id}", lc.handle_model_remove_chat)
-    app.router.add_post("/model/remove_acct/{acct_id}/{model_id}", lc.handle_model_remove_acct)
-    app.router.add_post("/model/update_acct/{acct_id}/{model_id}", lc.handle_model_update_acct)
-    app.router.add_post("/model/update_acct/{acct_id}", lc.handle_model_delete_acct)
-    app.router.add_post("/model/sync_chats/{prototype_id}/{model_id}", lc.handle_model_sync_chats)
-    app.router.add_post("/model/update_period/{prototype_id}/{model_id}", lc.handle_model_update_period)
-    app.router.add_post("/prototype/update/{prototype_id}", lc.handle_prototype_update)
-    app.router.add_post("/prototype/delete/{prototype_id}", lc.handle_prototype_delete)
-    app.router.add_post("/gateway/list_chats/{prototype_id}/{model_id}", lc.handle_gateway_list_chats)
-    app.router.add_post("/gateway/list_chats/{prototype_id}/{model_id}/{acct_id}", lc.handle_gateway_list_chats)
-    app.router.add_post("/gateway/{method}/{chat_id}/{prototype_id}/{model_id}/{acct_id}", lc.handle_gateway)
-    app.router.add_post("/reply/{method}/{chat_id}/{request_id}/{prototype_id}/{model_id}", lc.handle_reply)
+    app.router.add_post("/model/create/{prototype_id}/{model_id}", catch_external(lc.handle_model_create))
+    app.router.add_post("/model/remove/{prototype_id}/{model_id}", catch_external(lc.handle_model_remove))
+    app.router.add_post("/model/remove_chat/{chat_id}/{model_id}", catch_external(lc.handle_model_remove_chat))
+    app.router.add_post("/model/remove_acct/{acct_id}/{model_id}", catch_external(lc.handle_model_remove_acct))
+    app.router.add_post("/model/update_acct/{acct_id}/{model_id}", catch_external(lc.handle_model_update_acct))
+    app.router.add_post("/model/update_acct/{acct_id}", catch_external(lc.handle_model_delete_acct))
+    app.router.add_post("/model/sync_chats/{prototype_id}/{model_id}", catch_external(lc.handle_model_sync_chats))
+    app.router.add_post("/model/update_period/{prototype_id}/{model_id}", catch_external(lc.handle_model_update_period))
+    app.router.add_post("/prototype/update/{prototype_id}", catch_external(lc.handle_prototype_update))
+    app.router.add_post("/prototype/delete/{prototype_id}", catch_external(lc.handle_prototype_delete))
+    app.router.add_post("/gateway/list_chats/{prototype_id}/{model_id}", catch_external(lc.handle_gateway_list_chats))
+    app.router.add_post("/gateway/list_chats/{prototype_id}/{model_id}/{acct_id}", catch_external(lc.handle_gateway_list_chats))
+    app.router.add_post("/gateway/{method}/{chat_id}/{prototype_id}/{model_id}/{acct_id}", catch_external(lc.handle_gateway))
+    app.router.add_post("/reply/{method}/{chat_id}/{request_id}/{prototype_id}/{model_id}", catch_external(lc.handle_reply))

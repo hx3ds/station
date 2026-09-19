@@ -5,6 +5,9 @@ import os
 import re
 from typing import Callable, Optional
 
+from station.errors import ExternalError
+from station.prototypes.launch_settings import env_int
+
 MAX_TELEGRAM_MESSAGE_LENGTH = 4096
 MAX_TELEGRAM_CAPTION_LENGTH = 1024
 MAX_DISCORD_MESSAGE_LENGTH = 2000
@@ -767,20 +770,17 @@ _ATT_MEDIA_KIND = {
     "file": "document",
 }
 
-class MediaTooLargeError(Exception):
+class MediaTooLargeError(ExternalError):
     def __init__(self, platform: str, kind: str, size: int, limit: int):
         self.platform = platform
         self.kind = kind
         self.size = size
         self.limit = limit
-        super().__init__(f"{platform} {kind} exceeds size limit ({self.size} > {self.limit} bytes)")
+        super().__init__(
+            "%s %s exceeds size limit (%s > %s bytes)" % (platform, kind, self.size, self.limit),
+            status=413,
+        )
 
-def _env_int(key: str, fallback: int) -> int:
-    raw = (os.environ.get(key) or "").strip()
-    if not raw:
-        return fallback
-    n = int(raw)
-    return n if n >= 0 else fallback
 
 def telegram_local_bot_api(base_url: str = "") -> bool:
     base = (base_url or "").strip().lower()
@@ -796,7 +796,7 @@ def telegram_local_bot_api(base_url: str = "") -> bool:
     return "api.telegram.org" not in base
 
 def max_telegram_media_bytes(base_url: str = "") -> int:
-    override = _env_int("TELEGRAM_MAX_MEDIA_BYTES", 0)
+    override = env_int("TELEGRAM_MAX_MEDIA_BYTES", 0)
     if override > 0:
         return override
     if telegram_local_bot_api(base_url):
@@ -834,9 +834,9 @@ def max_media_bytes(platform: str, kind: str = "document", *, telegram_base_url:
     if platform == "telegram":
         return max_telegram_media_bytes(telegram_base_url)
     if platform == "discord":
-        return _env_int("DISCORD_MAX_ATTACHMENT_BYTES", MAX_DISCORD_MEDIA_BYTES)
+        return env_int("DISCORD_MAX_ATTACHMENT_BYTES", MAX_DISCORD_MEDIA_BYTES)
     if platform == "matrix":
-        return _env_int("MATRIX_MAX_MEDIA_BYTES", MAX_MATRIX_MEDIA_BYTES)
+        return env_int("MATRIX_MAX_MEDIA_BYTES", MAX_MATRIX_MEDIA_BYTES)
     if platform in ("whatsapp", "whatsapp_cloud"):
         return {
             "image": MAX_WHATSAPP_IMAGE_BYTES,
@@ -845,7 +845,7 @@ def max_media_bytes(platform: str, kind: str = "document", *, telegram_base_url:
             "sticker": MAX_WHATSAPP_STICKER_BYTES,
         }.get(kind, MAX_WHATSAPP_DOCUMENT_BYTES)
     if platform == "qq":
-        return _env_int("QQ_MAX_MEDIA_BYTES", MAX_QQ_MEDIA_BYTES)
+        return env_int("QQ_MAX_MEDIA_BYTES", MAX_QQ_MEDIA_BYTES)
     return MAX_TELEGRAM_MEDIA_BYTES
 
 def check_media_size(platform: str, size: int, kind: str = "document", *, telegram_base_url: str = "") -> None:

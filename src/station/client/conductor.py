@@ -149,7 +149,7 @@ def _local_conductor(ctx):
     if _local_tenant(ctx) is None:
         return None
     lc = ctx.app.get("local_conductor")
-    if lc is None or not lc.enabled:
+    if lc is None:
         return None
     return lc
 

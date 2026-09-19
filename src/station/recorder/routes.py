@@ -1,7 +1,9 @@
 from aiohttp import web
 
+from station.api.http import read_json_object
 from station.api.token import _require_admin
-from station.prototypes.boundary import ext_dict, ext_int, ext_str
+from station.errors import ExternalError
+from station.prototypes.boundary import ext_int, ext_str
 
 async def get_recorder_config(request):
     denied = _require_admin(request)
@@ -23,24 +25,12 @@ async def set_recorder_config(request):
     if denied is not None:
         return denied
     recorder = request.app["recorder"]
-    try:
-        data = ext_dict("body", await request.json())
-    except TypeError:
-        return web.json_response({"result": 1, "msg": "body must be object"}, status=400)
+    data = await read_json_object(request)
     smoothing_window = data.get("smoothing_window")
     if smoothing_window is not None:
-        try:
-            smoothing_window = ext_int("smoothing_window", smoothing_window)
-        except TypeError:
-            return web.json_response(
-                {"result": 1, "msg": "smoothing_window must be a positive integer"},
-                status=400,
-            )
+        smoothing_window = ext_int("smoothing_window", smoothing_window)
         if smoothing_window <= 0:
-            return web.json_response(
-                {"result": 1, "msg": "smoothing_window must be a positive integer"},
-                status=400,
-            )
+            raise ExternalError("smoothing_window must be a positive integer")
         recorder.smoothing_window = smoothing_window
     return web.json_response({"result": 0, "msg": "Recorder configuration updated"})
 
@@ -63,20 +53,11 @@ async def set_log_level(request):
     if denied is not None:
         return denied
     recorder = request.app["recorder"]
-    try:
-        data = ext_dict("body", await request.json())
-    except TypeError:
-        return web.json_response({"result": 1, "msg": "body must be object"}, status=400)
-    try:
-        level = ext_str("level", data.get("level"), default="")
-    except TypeError:
-        return web.json_response({"result": 1, "msg": "Level is required"}, status=400)
+    data = await read_json_object(request)
+    level = ext_str("level", data.get("level"), default="")
     if not level:
-        return web.json_response({"result": 1, "msg": "Level is required"}, status=400)
-    try:
-        recorder.set_log_level(level)
-    except ValueError as e:
-        return web.json_response({"result": 1, "msg": str(e)}, status=400)
+        raise ExternalError("Level is required")
+    recorder.set_log_level(level)
     return web.json_response({"result": 0, "level": recorder.get_log_level()})
 
 def setup_recorder_routes(app):

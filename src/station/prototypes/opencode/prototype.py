@@ -59,8 +59,6 @@ class OpenCodePrototype(OpenCodeAuthFlow, OpenCodeWorkspace, OpenCodeWorker, Ope
             settings.extra_env["OPENCODE_CONFIG"] = config_path
             settings.extra_env.setdefault("LOCAL_LLM_API_KEY", settings.local_llm_api_key or "local")
             settings.extra_env.setdefault("OPENAI_API_KEY", settings.local_llm_api_key or "local")
-            # `opencode serve` reads project config from cwd and $HOME/.config/opencode.
-            # OPENCODE_CONFIG alone is not enough when cwd is the user workspace.
             config_home = os.path.join(self.storage_dir, "opencode_home")
             config_dir = os.path.join(config_home, ".config", "opencode")
             os.makedirs(config_dir, exist_ok=True)

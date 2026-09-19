@@ -1,9 +1,9 @@
 import asyncio
-import json
 from typing import Any
 
 from aiohttp import web
 
+from station.api.http import read_json_object
 from station.conductor.crypto import decrypt_if_encrypted
 from station.conductor.platforms.policy import media_ref_action
 from station.conductor.platforms.base import LocalPlatformAdapter
@@ -13,9 +13,7 @@ from station.conductor.platforms.qq import QQIO
 from station.conductor.platforms.telegram import TelegramIO
 from station.conductor.platforms.whatsapp import WhatsAppAdapter
 from station.conductor.platforms.whatsapp_cloud import WhatsAppCloudAdapter
-from station.conductor.util import constant_time_equal, err
-from station.prototypes.boundary import ext_dict
-from station.prototypes.boundary import ext_dict
+from station.conductor.util import constant_time_equal, err, catch_external
 from station import logger
 
 def _plaintext_server(conductor, acct: dict) -> str:
@@ -143,19 +141,12 @@ class TelegramAdapter(LocalPlatformAdapter):
         got = (request.headers.get("X-Telegram-Bot-Api-Secret-Token") or "").strip()
         if not constant_time_equal(got, secret):
             return err("Unauthorized", status=401)
-        try:
-            body = await request.json()
-        except (json.JSONDecodeError, ValueError, TypeError):
-            return err("Invalid JSON body", status=400)
-        try:
-            body = ext_dict("body", body)
-        except TypeError:
-            return err("Invalid JSON body", status=400)
+        body = await read_json_object(request)
         ok_ = await self.io.process_update(acct_id=acct_id, update=body)
         return web.json_response({"result": 0, "data": {"ok": bool(ok_)}})
 
     def register_routes(self, app: web.Application) -> None:
-        app.router.add_post("/webhook/telegram/{acct_id}", self.handle_webhook)
+        app.router.add_post("/webhook/telegram/{acct_id}", catch_external(self.handle_webhook))
 
 class DiscordAdapter(LocalPlatformAdapter):
     acct_type = "discord"

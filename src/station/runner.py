@@ -10,7 +10,8 @@ import tomllib
 from pathlib import Path
 
 from .station import Station
-from station.prototypes.boundary import ext_bool, ext_dict, ext_float, ext_int, ext_list, ext_require, ext_str
+from station.errors import ExternalError
+from station.prototypes.boundary import ext_bool, ext_dict, ext_float, ext_int, ext_list, ext_str
 
 def _get_env(key: str) -> str | None:
     value = os.environ.get(key)
@@ -33,14 +34,6 @@ def _get_config_str(config: dict, key: str) -> str:
 def _load_toml_dict(path: str) -> dict:
     data = tomllib.loads(Path(path).read_text(encoding="utf-8"))
     return ext_dict("TOML root", data)
-
-def _resolve_secret_path(*, config: dict, secret_path_override: str | None = None) -> str:
-    path = (
-        (secret_path_override or "").strip()
-        or _get_env("STATION_SECRET_FILE")
-        or _get_config_str(config, "STATION_SECRET_FILE")
-    )
-    return path
 
 def _load_merged_config(*, config_path: str, secret_path_override: str | None = None) -> tuple[dict, str]:
     config = _load_toml_dict(config_path)
@@ -103,13 +96,13 @@ def _toml_literal(value) -> str:
         return str(value)
     if isinstance(value, float):
         if value != value:
-            raise TypeError("float NaN is not a valid TOML literal")
+            raise ExternalError("float NaN is not a valid TOML literal")
         return format(value, "g")
     if isinstance(value, str):
         return json.dumps(value)
     if value is None:
         return json.dumps("")
-    raise TypeError("unsupported TOML literal type: %s" % type(value).__name__)
+    raise ExternalError("unsupported TOML literal type: %s" % type(value).__name__)
 
 def _find_prototypes_table_ranges(lines: list[str]) -> list[tuple[int, int]]:
     ranges: list[tuple[int, int]] = []
@@ -180,7 +173,7 @@ def _apply_kv_updates_to_prototypes_table_by_name(
 ) -> str:
     name = (name or "").strip()
     if not name:
-        raise ValueError("prototype table name is required")
+        raise ExternalError("prototype table name is required")
     if not updates:
         return text
     lines = text.splitlines(keepends=True)
@@ -217,7 +210,7 @@ async def _post_station_admin(
                     parsed = None
                 try:
                     body = ext_dict("body", parsed)
-                except TypeError:
+                except ExternalError:
                     body = None
             return resp.status, body, raw
 
@@ -229,25 +222,23 @@ def _raise_admin_error(route: str, status: int, body: dict | None, raw: str) -> 
 
 async def _admin_update_station_token(
     *,
-    session: aiohttp.ClientSession,
     station_url: str,
     admin_token: str,
     new_token: str,
     grace_seconds: int = 300,
     prototype_id: int | None = None,
 ) -> None:
-    del session
     station_url = _normalize_base_url(station_url)
     if not station_url:
-        raise ValueError("station_url is required")
+        raise ExternalError("station_url is required")
     admin_token = (admin_token or "").strip()
     if not admin_token:
-        raise ValueError("admin_token is required")
+        raise ExternalError("admin_token is required")
     new_token = (new_token or "").strip()
     if not new_token:
-        raise ValueError("new_token is required")
+        raise ExternalError("new_token is required")
     if grace_seconds < 0:
-        raise ValueError("grace_seconds must be an int >= 0")
+        raise ExternalError("grace_seconds must be an int >= 0")
 
     url = f"{station_url}/admin/prototype_token"
     headers = {"X-Admin-Token": admin_token}
@@ -257,14 +248,13 @@ async def _admin_update_station_token(
     status, body, raw = await _post_station_admin(url, payload=payload, headers=headers)
     try:
         body = ext_dict("body", body)
-    except TypeError:
+    except ExternalError:
         body = None
     if status != 200 or body is None or body.get("result") != 0:
         _raise_admin_error("admin/prototype_token", status, body, raw)
 
 async def _admin_attach_prototype(
     *,
-    session: aiohttp.ClientSession,
     station_url: str,
     admin_token: str,
     prototype_id: int,
@@ -277,13 +267,12 @@ async def _admin_attach_prototype(
     ava: bool = False,
     reply_to: bool = False,
 ) -> dict:
-    del session
     station_url = _normalize_base_url(station_url)
     if not station_url:
-        raise ValueError("station_url is required")
+        raise ExternalError("station_url is required")
     admin_token = (admin_token or "").strip()
     if not admin_token:
-        raise ValueError("admin_token is required")
+        raise ExternalError("admin_token is required")
     url = f"{station_url}/admin/prototype"
     headers = {"X-Admin-Token": admin_token}
     kind = (kind or "station").strip() or "station"
@@ -303,7 +292,7 @@ async def _admin_attach_prototype(
     status, body, raw = await _post_station_admin(url, payload=payload, headers=headers)
     try:
         body = ext_dict("body", body)
-    except TypeError:
+    except ExternalError:
         body = None
     if status != 200 or body is None or body.get("result") != 0:
         _raise_admin_error("admin/prototype", status, body, raw)
@@ -593,7 +582,6 @@ def _run_update_token(args: argparse.Namespace) -> int:
 
             if new_token:
                 await _admin_update_station_token(
-                    session=session,
                     station_url=args.station_url,
                     admin_token=admin_token,
                     new_token=new_token,
@@ -651,7 +639,7 @@ def _run_update_token(args: argparse.Namespace) -> int:
                     try:
                         if raw_id is not None and ext_int("id", raw_id) == want_id:
                             filtered.append(e)
-                    except TypeError:
+                    except ExternalError:
                         pass
                 named = filtered
                 if not named:
@@ -687,7 +675,6 @@ def _run_update_token(args: argparse.Namespace) -> int:
                     raise RuntimeError(f"ensure_prototype returned empty token for name={name!r}")
                 ensured_id = ext_int("prototype_id", ensured["prototype_id"])
                 await _admin_update_station_token(
-                    session=session,
                     station_url=args.station_url,
                     admin_token=admin_token,
                     new_token=token,
@@ -782,7 +769,6 @@ def _run_attach_prototype(args: argparse.Namespace) -> int:
                     )
 
             data = await _admin_attach_prototype(
-                session=session,
                 station_url=args.station_url,
                 admin_token=admin_token,
                 prototype_id=prototype_id,

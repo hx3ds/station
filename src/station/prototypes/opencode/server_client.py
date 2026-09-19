@@ -9,6 +9,7 @@ from urllib.parse import quote
 import aiohttp
 
 from station import logger
+from station.errors import ExternalError
 from station.prototypes.boundary import ext_bool, ext_dict, ext_list, ext_str
 from station.prototypes.gateway_process import SessionEvent, SessionEventBus, close_subprocess, gateway_subprocess_kwargs
 from station.prototypes.launch_settings import apply_local_provider_env
@@ -161,7 +162,7 @@ class OpenCodeServerProcess:
         result = await self._request_dict("POST", "/session", json_body=body)
         session_id = ext_str("OpenCode session id", result.get("id"))
         if not session_id:
-            raise TypeError("OpenCode session create must return non-empty str id")
+            raise ExternalError("OpenCode session create must return non-empty str id")
         logger.info("OpenCode session created session_id=%s", session_id)
         return session_id
 
@@ -190,13 +191,6 @@ class OpenCodeServerProcess:
         if self.settings.variant:
             body["variant"] = self.settings.variant
         return body
-
-    async def abort(self, *, session_id):
-        await self._request_json(
-            "POST",
-            "/session/%s/abort" % quote(session_id, safe=""),
-            expect_json=False,
-        )
 
     async def reply_permission(self, *, request_id, reply="always"):
         await self._request_json(
@@ -340,7 +334,7 @@ class OpenCodeServerProcess:
             try:
                 return json.loads(text)
             except json.JSONDecodeError as exc:
-                raise TypeError("OpenCode %s %s returned non-JSON: %s" % (method, path, text[:500])) from exc
+                raise ExternalError("OpenCode %s %s returned non-JSON: %s" % (method, path, text[:500])) from exc
 
     async def _request_dict(self, method, path, *, json_body=None):
 
@@ -413,7 +407,7 @@ class OpenCodeServerProcess:
         try:
             frame = json.loads(raw)
         except json.JSONDecodeError as exc:
-            raise TypeError("OpenCode SSE malformed JSON: %s" % raw[:400]) from exc
+            raise ExternalError("OpenCode SSE malformed JSON: %s" % raw[:400]) from exc
         frame = ext_dict("OpenCode SSE frame", frame)
 
         event_type = ext_str("OpenCode SSE type", frame.get("type"))

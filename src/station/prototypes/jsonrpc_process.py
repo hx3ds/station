@@ -58,8 +58,6 @@ class JsonLineRpcProcess:
         if future is None or future.done():
             return False
         if error is not None:
-            if not isinstance(error, BaseException):
-                raise TypeError("error must be BaseException")
             future.set_exception(error)
         else:
             future.set_result(result)

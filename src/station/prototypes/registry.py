@@ -1,5 +1,7 @@
 import importlib
 
+from station.errors import ExternalError
+
 KIND_ENTRYPOINTS = {
     "station": "station.prototypes.prototype:Prototype",
     "hermes": "station.prototypes.hermes.prototype:HermesPrototype",
@@ -23,10 +25,10 @@ def resolve_prototype_class(kind):
         return cached
     entry = KIND_ENTRYPOINTS.get(kind)
     if not entry:
-        raise ValueError("Unknown prototype kind: %s" % kind)
+        raise ExternalError("Unknown prototype kind: %s" % kind)
     module_name, _, attr = entry.partition(":")
     if not module_name or not attr:
-        raise ValueError("Invalid kind entrypoint for %s: %s" % (kind, entry))
+        raise ExternalError("Invalid kind entrypoint for %s: %s" % (kind, entry))
     module = importlib.import_module(module_name)
     cls = module.__dict__[attr]
     _class_cache[kind] = cls

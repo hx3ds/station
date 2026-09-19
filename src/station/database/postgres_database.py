@@ -15,6 +15,7 @@ from station.database.file_registry import (
     FILES_TABLE_SQL_POSTGRES,
     row_to_file_dict,
 )
+from station.errors import ExternalError, InternalError
 from station import logger
 
 class PostgresDatabase(AsyncDatabase):
@@ -54,7 +55,7 @@ class PostgresDatabase(AsyncDatabase):
 
     def _model_lock_key(self, model_id: str) -> int:
         if not model_id:
-            raise ValueError("model_id is required for model lock")
+            raise InternalError("model_id is required for model lock")
         digest = hashlib.blake2b(model_id.encode("utf-8"), digest_size=8, person=b"station_model").digest()
         return int.from_bytes(digest, byteorder="big", signed=True)
 
@@ -66,14 +67,14 @@ class PostgresDatabase(AsyncDatabase):
         state_key: str | None = None,
     ) -> tuple[str, str | None, str | None]:
         if not acct_id:
-            raise ValueError("acct_id is required")
+            raise ExternalError("acct_id is required")
         normalized_type = None
         if acct_type is not None:
             normalized_type = validate_local_platform_type(acct_type, field_name="acct_type")
         normalized_key = None
         if state_key is not None:
             if not state_key:
-                raise ValueError("state_key is required")
+                raise ExternalError("state_key is required")
             normalized_key = validate_local_platform_type(state_key, field_name="state_key")
         return acct_id, normalized_type, normalized_key
 
@@ -370,7 +371,7 @@ class PostgresDatabase(AsyncDatabase):
 
     def insert_file(self, *, model_id, file_id, folder, kind, ext="", status="ready", original_name=None, mime_type=None, size_bytes=None, created_at=None, info=None, remote_file_id=None, url=None, chat_id=None, acct_id=None, server=None, remote_path=None):
         if not model_id:
-            raise ValueError("missing_model_id")
+            raise InternalError("missing_model_id")
         if created_at is None:
             created_at = time.time()
         cols = ", ".join(FILE_COLUMNS)
@@ -404,7 +405,7 @@ class PostgresDatabase(AsyncDatabase):
                     *values,
                 )
             except asyncpg.UniqueViolationError as e:
-                raise ValueError("file_id_exists") from e
+                raise ExternalError("file_id_exists") from e
 
         self._run_sync(self._with_fresh_conn(_do))
 
@@ -441,31 +442,6 @@ class PostgresDatabase(AsyncDatabase):
 
         self._run_sync(self._with_fresh_conn(_do))
         return self.get_file(file_id, model_id=model_id, include_remote=False)
-
-    def list_files(self, *, model_id, kind=None, status=None, folder=None):
-        if not model_id:
-            return []
-        clauses = ["model_id = $1"]
-        args = [model_id]
-        if kind:
-            args.append(kind)
-            clauses.append(f"kind = ${len(args)}")
-        if status:
-            args.append(status)
-            clauses.append(f"status = ${len(args)}")
-        if folder:
-            args.append(folder)
-            clauses.append(f"folder = ${len(args)}")
-        where = " WHERE " + " AND ".join(clauses)
-
-        async def _do(conn):
-            rows = await conn.fetch(
-                f"SELECT * FROM files{where} ORDER BY created_at DESC",
-                *args,
-            )
-            return [row_to_file_dict(r, include_remote=False) for r in rows]
-
-        return self._run_sync(self._with_fresh_conn(_do))
 
     async def get_or_fetch_model(self, model_id: str, session, consul_url: str, token: str) -> dict | None:
         model = await self.get_model(model_id)
@@ -538,7 +514,7 @@ class PostgresDatabase(AsyncDatabase):
 
     async def put_inbound_pending(self, *, job_id: str, model_id: str, kind: str, payload: dict) -> None:
         if not job_id or not model_id or not kind:
-            raise ValueError("inbound_pending requires job_id, model_id, and kind")
+            raise InternalError("inbound_pending requires job_id, model_id, and kind")
         body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
         async with self.pool.acquire() as conn:
             await conn.execute(
@@ -629,7 +605,7 @@ class PostgresDatabase(AsyncDatabase):
         is_local: bool = True,
     ) -> None:
         if not acct_id:
-            raise ValueError("acct_id is required")
+            raise ExternalError("acct_id is required")
         acct_type = validate_local_platform_type(acct_type, field_name="acct_type")
         async with self.pool.acquire() as conn:
             await conn.execute(
@@ -718,7 +694,7 @@ class PostgresDatabase(AsyncDatabase):
 
     async def replace_model_chats(self, *, model_id: str, prototype_id: int | None, chats: list[dict]) -> None:
         if not model_id:
-            raise ValueError("model_id is required")
+            raise InternalError("model_id is required")
         now = int(time.time())
         async with self.pool.acquire() as conn:
             async with conn.transaction():

@@ -3,7 +3,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from station import logger
-from station.prototypes.boundary import ext_str
+from station.errors import ExternalError
+from station.prototypes.boundary import ext_dict, ext_str
 from station.prototypes.device_auth import PrototypeDeviceAuth, format_device_login_start, local_llm_auth_reply
 
 from .config import DEVICE_CODE_PROVIDERS, XAI_PROVIDERS, hermes_home_path
@@ -221,12 +222,12 @@ class HermesAuthFlow(PrototypeDeviceAuth):
             return
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return
-        if not isinstance(data, dict):
-            return
+        except json.JSONDecodeError:
+            raise ExternalError("hermes config is not valid JSON")
+        data = ext_dict("hermes config", data)
         model = data.get("model")
-        if isinstance(model, dict):
+        if model is not None:
+            model = ext_dict("hermes config model", model)
             model.pop("provider", None)
             model.pop("default", None)
         path.write_text(json.dumps(data, indent=2), encoding="utf-8")

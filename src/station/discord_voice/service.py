@@ -9,26 +9,8 @@ from collections import deque
 
 import aiohttp
 from station import logger
-from station.prototypes.boundary import ext_bool, ext_dict, ext_float, ext_int, ext_list, ext_require, ext_str
-
-def _ext_str(value, name, *, default=None, required=False):
-    if value is None:
-        if required:
-            raise TypeError("%s is required" % name)
-        return default
-    return ext_str(name, value)
-
-def _ext_int(value, name, *, default=None, required=False):
-    if value is None:
-        if required:
-            raise TypeError("%s is required" % name)
-        return default
-    return ext_int(name, value)
-
-def _ext_number(value, name, *, default=None):
-    if value is None:
-        return default
-    return ext_float(name, value)
+from station.errors import ExternalError
+from station.prototypes.boundary import ext_dict, ext_float, ext_int, ext_list, ext_str
 
 def pcm_stereo_to_mono(pcm_stereo):
     if not pcm_stereo:
@@ -163,7 +145,7 @@ class DiscordVoiceConnection:
                     data = ext_dict('discord voice ws message', data)
                     try:
                         await self._handle_ws(data)
-                    except TypeError as e:
+                    except ExternalError as e:
                         logger.error(
                             "discord voice bad payload guild_id=%s channel_id=%s error=%s",
                             self.guild_id,
@@ -196,7 +178,7 @@ class DiscordVoiceConnection:
         else:
             payload = ext_dict('discord voice payload', payload)
         if op == 8:
-            interval_ms = _ext_number(payload.get("heartbeat_interval"), "heartbeat_interval", default=0)
+            interval_ms = ext_float("heartbeat_interval", payload.get("heartbeat_interval"), default=0, allow_none=True)
             interval = interval_ms / 1000.0
             await self._send_json({
                 "op": 0,
@@ -234,7 +216,7 @@ class DiscordVoiceConnection:
             ssrc = payload.get("ssrc")
             user_id = payload.get("user_id")
             if ssrc is not None and user_id is not None:
-                self.map_ssrc(_ext_int(ssrc, "ssrc"), _ext_str(user_id, "user_id"))
+                self.map_ssrc(ext_int("ssrc", ssrc), ext_str("user_id", user_id))
             return
 
     async def _heartbeat_loop(self, interval):
@@ -254,9 +236,9 @@ class DiscordVoiceConnection:
             )
 
     async def _on_ready(self, payload):
-        self._ssrc = _ext_int(payload.get("ssrc"), "ssrc", default=0)
-        ip = _ext_str(payload.get("ip"), "ip", default="") or ""
-        port = _ext_int(payload.get("port"), "port", default=0)
+        self._ssrc = ext_int("ssrc", payload.get("ssrc"))
+        ip = ext_str("ip", payload.get("ip"))
+        port = ext_int("port", payload.get("port"))
         modes = payload.get("modes")
         if modes is None:
             modes = []
@@ -524,15 +506,12 @@ class DiscordVoiceService:
         on_ended=None,
     ):
         content = ext_dict('discord voice content', content)
-        for key in ("guild_id", "channel_id", "user_id", "endpoint", "token", "session_id"):
-            val = content.get(key)
-            val = ext_str('val', val, strip=False)
-        guild_id = content["guild_id"].strip()
-        channel_id = content["channel_id"].strip()
-        user_id = content["user_id"].strip()
-        endpoint = content["endpoint"].strip()
-        token = content["token"].strip()
-        session_id = content["session_id"].strip()
+        guild_id = ext_str("guild_id", content.get("guild_id"))
+        channel_id = ext_str("channel_id", content.get("channel_id"))
+        user_id = ext_str("user_id", content.get("user_id"))
+        endpoint = ext_str("endpoint", content.get("endpoint"))
+        token = ext_str("token", content.get("token"))
+        session_id = ext_str("session_id", content.get("session_id"))
         if not guild_id:
             return False
         key = self._key(acct_id=acct_id, guild_id=guild_id)
@@ -577,7 +556,7 @@ class DiscordVoiceService:
         content = ext_dict('discord voice content', content)
         try:
             guild_id = ext_str("guild_id", content.get("guild_id"), default="")
-        except TypeError:
+        except ExternalError:
             return False
         if not guild_id:
             return False

@@ -3,6 +3,8 @@ import os
 
 from station import logger
 
+from station.errors import ExternalError
+
 from .config import (
     clear_workspace_override,
     is_windows_interop_path,
@@ -122,17 +124,17 @@ class OpenCodeWorkspace:
     def _resolve_workspace_path(self, raw):
         text = raw.strip()
         if not text:
-            raise ValueError("path is required")
+            raise ExternalError("path is required")
         if is_windows_interop_path(text):
-            raise ValueError("Windows/interop paths are not allowed; use a Linux path")
+            raise ExternalError("Windows/interop paths are not allowed; use a Linux path")
         path = os.path.expanduser(text)
         if not os.path.isabs(path):
             path = os.path.join(self._workspace_root(), path)
         resolved = os.path.realpath(path)
         if is_windows_interop_path(resolved):
-            raise ValueError("Windows/interop paths are not allowed; use a Linux path")
+            raise ExternalError("Windows/interop paths are not allowed; use a Linux path")
         if os.path.exists(resolved) and not os.path.isdir(resolved):
-            raise ValueError("%s is not a directory" % resolved)
+            raise ExternalError("%s is not a directory" % resolved)
         os.makedirs(resolved, exist_ok=True)
         return resolved
 

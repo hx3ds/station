@@ -3,13 +3,14 @@ import re
 import time
 import uuid
 
+from station.errors import ExternalError, InternalError
 from station.prototypes.boundary import ext_dict, ext_list, ext_str, validate_attachment
 from station.prototypes.fs_paths import model_dir
 
-_VALID_KINDS = ("url", "chat", "server", "temp")
+_VALID_KINDS = ("chat", "temp")
 _VALID_FOLDERS = ("download", "temp")
 _VALID_STATUSES = ("registered", "ready")
-_KIND_FOLDER = {"url": "download", "chat": "download", "server": "download", "temp": "temp"}
+_KIND_FOLDER = {"chat": "download", "temp": "temp"}
 _PUBLIC_META_KEYS = (
     "file_id",
     "folder",
@@ -69,7 +70,7 @@ class BoundFileSystem:
     def db(self):
         db = self.app.get("db")
         if db is None:
-            raise RuntimeError("missing_db")
+            raise InternalError("missing_db")
         return db
 
     @property
@@ -108,7 +109,7 @@ class BoundFileSystem:
     def resolve_file_id(self, file_id):
         row = self._get_row(file_id)
         if row is None:
-            raise ValueError("file_not_found")
+            raise ExternalError("file_not_found")
         return self.absolute_path_for_row(row)
 
     def _public_meta(self, row):
@@ -140,15 +141,15 @@ class BoundFileSystem:
     ):
         fid = file_id.strip() if file_id else ""
         if not fid or len(fid) != 32 or any(c not in "0123456789abcdef" for c in fid):
-            raise ValueError("invalid_file_id")
+            raise ExternalError("invalid_file_id")
         if folder not in _VALID_FOLDERS:
-            raise ValueError("invalid_folder")
+            raise ExternalError("invalid_folder")
         if kind not in _VALID_KINDS:
-            raise ValueError("invalid_kind")
+            raise ExternalError("invalid_kind")
         if _KIND_FOLDER[kind] != folder:
-            raise ValueError("folder_kind_mismatch")
+            raise ExternalError("folder_kind_mismatch")
         if status not in _VALID_STATUSES:
-            raise ValueError("invalid_status")
+            raise ExternalError("invalid_status")
         e = sanitize_ext(ext)
         self.db.insert_file(
             model_id=self.model_id,
@@ -175,19 +176,10 @@ class BoundFileSystem:
         self.db.update_file(file_id, model_id=self.model_id, **fields)
         return self.check_file(file_id)
 
-    def list_downloads(self, *, kind=None, status=None, folder=None):
-        rows = self.db.list_files(model_id=self.model_id, kind=kind, status=status, folder=folder)
-        out = []
-        for r in rows:
-            meta = self._public_meta(r)
-            meta["path"] = self.absolute_path_for_row(r)
-            out.append(meta)
-        return out
-
     def check_file(self, file_id):
         row = self._get_row(file_id, include_remote=False)
         if row is None:
-            raise ValueError("file_not_found")
+            raise ExternalError("file_not_found")
         meta = self._public_meta(row)
         full = self.absolute_path_for_row(row)
         meta["path"] = full
@@ -221,9 +213,9 @@ class BoundFileSystem:
 
         row = self._get_row(file_id, include_remote=True)
         if row is None:
-            raise ValueError("file_not_found")
+            raise ExternalError("file_not_found")
         if row["kind"] != "chat":
-            raise ValueError("not_chat_file")
+            raise ExternalError("not_chat_file")
         if row["status"] == "ready":
             full = self.absolute_path_for_row(row)
             if os.path.isfile(full):
@@ -240,7 +232,7 @@ class BoundFileSystem:
             if not (remote.startswith("http://") or remote.startswith("https://")):
                 remote_file_id = stored_url
         if not remote_file_id or not chat_id or not acct_id:
-            raise ValueError("missing_remote_fields")
+            raise ExternalError("missing_remote_fields")
         if client_context is None:
             registry = self.app.get("tenants")
             if registry is not None:
@@ -248,7 +240,7 @@ class BoundFileSystem:
                 if tenant is not None:
                     client_context = tenant.client_context
         if client_context is None:
-            raise ValueError("missing_client_context")
+            raise InternalError("missing_client_context")
         data = await gateway_download_file(
             client_context,
             model_id=self.model_id,
@@ -259,7 +251,7 @@ class BoundFileSystem:
             acct_id=acct_id,
         )
         if not data:
-            raise ValueError("download_failed")
+            raise ExternalError("download_failed")
         full, size = self._write_bytes(
             folder=row["folder"],
             kind=row["kind"],
@@ -290,7 +282,7 @@ class BoundFileSystem:
         remote_path=None,
     ):
         if kind not in _VALID_KINDS:
-            raise ValueError("invalid_kind")
+            raise ExternalError("invalid_kind")
         folder = _KIND_FOLDER[kind]
         fid = file_id or new_file_id()
         e = sanitize_ext(ext) if ext is not None else ext_from_name(original_name or remote_path or url)
@@ -313,33 +305,9 @@ class BoundFileSystem:
             remote_path=remote_path,
         )
 
-    def place_server_file(
-        self,
-        *,
-        data,
-        original_name=None,
-        mime_type=None,
-        info=None,
-        server=None,
-        remote_path=None,
-        ext=None,
-        file_id=None,
-    ):
-        return self._place_ready(
-            data=data,
-            kind="server",
-            original_name=original_name,
-            mime_type=mime_type,
-            info=info,
-            ext=ext,
-            file_id=file_id,
-            server=server,
-            remote_path=remote_path,
-        )
-
     def save_temp(self, *, data=None, content=None, original_name=None, mime_type=None, info=None, ext=None, file_id=None):
         if data is None and content is None:
-            raise ValueError("missing_data")
+            raise ExternalError("missing_data")
         if data is None:
             data = content.encode("utf-8")
         return self._place_ready(
@@ -350,46 +318,6 @@ class BoundFileSystem:
             info=info,
             ext=ext,
             file_id=file_id,
-        )
-
-    async def download_url(self, *, url, timeout_seconds=60, info=None):
-
-        u = ext_str("url", url)
-        if not (u.startswith("http://") or u.startswith("https://")):
-            raise ValueError("invalid_url")
-        from urllib.parse import urlparse
-
-        path = ext_str("url path", urlparse(u).path)
-        e = ext_from_name(path)
-        fid = new_file_id()
-        name = disk_name(kind="url", file_id=fid, ext=e)
-        full = os.path.join(self.download_dir, name)
-        session = self.app["session"]
-        async with session.get(u, timeout=timeout_seconds) as resp:
-            if resp.status >= 400:
-                raise ValueError(f"http_{resp.status}")
-            parent = os.path.dirname(full)
-            os.makedirs(parent, exist_ok=True)
-            tmp = os.path.join(parent, f".{name}.{uuid.uuid4().hex}.tmp")
-            with open(tmp, "wb") as f:
-                while True:
-                    chunk = await resp.content.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-            os.replace(tmp, full)
-        size = os.path.getsize(full)
-        original = os.path.basename(path) or None
-        return self.register_file(
-            file_id=fid,
-            folder="download",
-            kind="url",
-            ext=e,
-            info=info,
-            status="ready",
-            original_name=original,
-            size_bytes=size,
-            url=u,
         )
 
     def register_inbound_attachment(self, attachment, *, chat_id=None, acct_id=None):

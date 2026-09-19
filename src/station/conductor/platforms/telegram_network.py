@@ -6,7 +6,7 @@ from typing import Iterable
 import aiohttp
 from station import logger
 from station.conductor.util import ext_str
-from station.prototypes.boundary import ext_dict, ext_float, ext_list, ext_require
+from station.prototypes.boundary import ext_dict, ext_list
 
 _TELEGRAM_API_HOST = "api.telegram.org"
 _DOH_TIMEOUT = 4.0

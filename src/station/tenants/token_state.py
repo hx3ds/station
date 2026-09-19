@@ -1,6 +1,8 @@
 import asyncio
 import time
 
+from station.errors import ExternalError
+
 class TokenState:
     def __init__(self, token: str):
         self.token = (token or "").strip()
@@ -26,9 +28,9 @@ class TokenState:
     async def rotate_token(self, token: str, *, grace_seconds: int = 0) -> None:
         token = (token or "").strip()
         if not token:
-            raise ValueError("token must be a non-empty string")
+            raise ExternalError("token must be a non-empty string")
         if grace_seconds < 0:
-            raise ValueError("grace_seconds must be >= 0")
+            raise ExternalError("grace_seconds must be >= 0")
         async with self.lock:
             old = self.token
             self.token = token

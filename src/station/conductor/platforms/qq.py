@@ -16,7 +16,8 @@ from station.conductor.platforms.keyboard import join_text_and_keyboard, parse_k
 from station.conductor.platforms.policy import allows_media
 from station.conductor.util import attachment_type_from_meta, ext_id, ext_int, ext_str
 from station import logger
-from station.prototypes.boundary import ext_dict, ext_float, ext_list, ext_require
+from station.errors import ExternalError
+from station.prototypes.boundary import ext_dict, ext_float, ext_list
 
 TOKEN_URL = "https://bots.qq.com/app/getAppAccessToken"
 DEFAULT_API_BASE = "https://api.sgroup.qq.com"
@@ -68,7 +69,7 @@ def _normalize_keyboard(keyboard):
         return None
     native = qq_keyboard(keyboard)
     if native is None:
-        raise TypeError("qq keyboard must contain content or rows")
+        raise ExternalError("qq keyboard must contain content or rows")
     return native
 
 def _format_size(size_bytes):
@@ -346,7 +347,7 @@ class QQIO:
                         app_id, _ = parse_qq_credentials(token)
                         self._access_by_app.pop(app_id, None)
                     raise RuntimeError(f"QQ API [{status}] {path}: {raw[:500]}")
-                raise TypeError("qq api response must be json dict")
+                raise ExternalError("qq api response must be json dict")
             data = ext_dict('qq api response', data)
             status = int(resp.status)
             if status >= 400:
@@ -508,7 +509,7 @@ class QQIO:
 
     async def _chunked_upload(self, *, token, chat_type, chat_id, file_path, file_type, file_name, server=None):
         if chat_type not in ("c2c", "group"):
-            raise ValueError(f"unsupported chat_type {chat_type}")
+            raise ExternalError("unsupported chat_type %s" % chat_type)
         file_size = os.path.getsize(file_path)
         hashes = await asyncio.get_running_loop().run_in_executor(None, _compute_file_hashes, file_path, file_size)
         base = "/v2/users" if chat_type == "c2c" else "/v2/groups"
@@ -552,8 +553,8 @@ class QQIO:
             raw_parts = []
         try:
             raw_parts = ext_list("qq upload parts", raw_parts)
-        except TypeError as e:
-            raise RuntimeError(f"upload_prepare missing parts: {raw}") from e
+        except ExternalError as e:
+            raise ExternalError("upload_prepare missing parts: %s" % raw) from e
         if not raw_parts:
             raise RuntimeError(f"upload_prepare missing parts: {raw}")
         for p in raw_parts:
@@ -1280,7 +1281,8 @@ class QQIO:
                         t = payload.get("t")
                         s = payload.get("s")
                         d = payload.get("d")
-                        if isinstance(s, int) and not isinstance(s, bool):
+                        if s is not None:
+                            s = ext_int(s, "s")
                             last = sess.get("last_seq")
                             if last is None or s > last:
                                 sess["last_seq"] = s
@@ -1299,12 +1301,11 @@ class QQIO:
                             else:
                                 await self._send_identify(ws=ws, token=token, server=server)
                         elif op == 0 and t:
-                            if t == "READY" and isinstance(d, dict):
+                            if t == "READY":
+                                d = ext_dict("qq READY d", d)
                                 sess["session_id"] = d.get("session_id")
                                 await self._save_runtime_state(acct_id)
                                 backoff_idx = 0
-                            elif t == "READY":
-                                raise TypeError("qq READY d must be dict")
                             elif t == "RESUMED":
                                 backoff_idx = 0
                             elif t in {

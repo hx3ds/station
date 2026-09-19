@@ -98,46 +98,12 @@ def attachment_from_params(method, params):
         attachment["file_name"] = file_name
     return attachment
 
-def attachment_summary_parts(attachments, limit=5):
-    parts = []
-    for att in normalize_attachments(attachments)[:limit]:
-        attachment_type = att.get("type")
-        if attachment_type is None:
-            attachment_type = "file"
-        else:
-            attachment_type = ext_str("attachment type", attachment_type)
-        file_name = att.get("file_name")
-        if file_name is None:
-            file_name = att.get("filename")
-        if file_name is None:
-            file_name = ""
-        else:
-            file_name = ext_str("attachment file_name", file_name)
-        file_id = att.get("file_id")
-        if file_id is None:
-            file_id = ""
-        else:
-            file_id = ext_str("attachment file_id", file_id)
-        part = f"{attachment_type}"
-        if file_name:
-            part += f":{file_name}"
-        if file_id:
-            part += f"({file_id})"
-        parts.append(part)
-    return parts
-
-def attachment_summary_text(attachments, limit=5):
-    return ", ".join(attachment_summary_parts(attachments, limit=limit))
-
 class PrototypeAttachments:
     def _attachment_str(self, attachment, *keys):
         return attachment_str(attachment, *keys)
 
     def _attachment_display_name(self, attachment, *, local_path=""):
         return attachment_display_name(attachment, local_path=local_path)
-
-    def _attachment_content_type(self, attachment):
-        return attachment_content_type(attachment)
 
     def _is_image_attachment(self, attachment, *, local_path=""):
         return is_image_attachment(attachment, local_path=local_path)

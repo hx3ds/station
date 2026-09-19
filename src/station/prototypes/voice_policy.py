@@ -1,16 +1,18 @@
+from station.errors import ExternalError
+
 VOICE_REPLY_MODES = frozenset({"voice_only", "all", "off"})
 VOICE_DELIVERY_METHODS = frozenset({"voice", "audio"})
 
 def parse_voice_reply_mode(value, *, default="voice_only"):
     mode = (value or "").strip().lower() or default
     if mode not in VOICE_REPLY_MODES:
-        raise ValueError("voice.reply_mode must be voice_only, all, or off")
+        raise ExternalError("voice.reply_mode must be voice_only, all, or off")
     return mode
 
 def parse_voice_delivery_method(value, *, default="voice"):
     method = (value or "").strip().lower() or default
     if method not in VOICE_DELIVERY_METHODS:
-        raise ValueError("voice.delivery_method must be voice or audio")
+        raise ExternalError("voice.delivery_method must be voice or audio")
     return method
 
 def should_send_voice_reply(*, reply_mode, incoming_had_audio):

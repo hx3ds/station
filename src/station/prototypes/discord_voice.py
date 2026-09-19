@@ -12,8 +12,6 @@ def _chat_type_from_opened(chat_opened):
         return ""
     if type(channel_type) is str:
         return channel_type.strip()
-    if type(channel_type) is bool:
-        raise TypeError("channel_type must be str or int")
     channel_type = ext_int("channel_type", channel_type)
     if channel_type == 1:
         return "dm"

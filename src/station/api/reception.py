@@ -21,16 +21,15 @@ from station.prototypes.attachments import (
     merge_attachments,
 )
 from station import logger
+from station.api.http import ext_path_int, log_caught, read_json_object
+from station.errors import ExternalError
 from station.prototypes.boundary import ext_bool, ext_dict, ext_list, ext_require, ext_str
 
 def _same_prototype(instance, tenant_id) -> bool:
     return instance.prototype_id == tenant_id
 
 def relay_error(*, reason, msg, status, retryable=None):
-    payload = {"result": 1, "msg": msg, "reason": reason, "data": None}
-    if retryable is not None:
-        payload["retryable"] = retryable
-    return web.json_response(payload, status=status)
+    raise ExternalError(msg, status=status, reason=reason, retryable=retryable)
 
 def is_slash_command(text):
     t = text.strip()
@@ -116,11 +115,11 @@ def _instance_delivery_rejection_response(result):
 async def _start_instance(*, app, instance, model_id):
     try:
         await instance.start()
-    except ValueError as e:
+    except ExternalError as e:
         await isolate_instance(app, model_id, instance)
-        return relay_error(reason="invalid_request", msg=str(e), status=400)
+        raise ExternalError(str(e), status=400, reason="invalid_request")
     except Exception as e:
-        logger.error("unexpected where=reception start_instance model_id=%s error=%s", model_id, e, exc_info=e)
+        log_caught(logger, e, where="reception start_instance model_id=%s" % model_id)
         await isolate_instance(app, model_id, instance)
         raise
     return None
@@ -129,7 +128,7 @@ async def _deliver(*, app, instance, model_id, deliver):
     try:
         result = await deliver()
     except Exception as e:
-        logger.error("unexpected where=reception deliver model_id=%s error=%s", model_id, e, exc_info=e)
+        log_caught(logger, e, where="reception deliver model_id=%s" % model_id)
         count = note_instance_unexpected(app, model_id)
         if should_isolate(count, app):
             await isolate_instance(app, model_id, instance)
@@ -143,11 +142,11 @@ async def _check_or_sync_prototype_version(request, app, tenant):
 
     incoming_version_raw = request.headers.get("X-Prototype-Version") or ""
     if incoming_version_raw == "":
-        return web.json_response({"result": 1, "msg": "Synchronize from consul", "data": None}, status=490)
+        raise ExternalError("Synchronize from consul", status=490)
     try:
-        incoming_version = int(incoming_version_raw)
-    except ValueError:
-        return web.json_response({"result": 1, "msg": "Synchronize from consul", "data": None}, status=490)
+        incoming_version = ext_path_int("X-Prototype-Version", incoming_version_raw)
+    except ExternalError:
+        raise ExternalError("Synchronize from consul", status=490)
 
     ctx = tenant.client_context
     if ctx is not None and ctx.prototype_version is not None:
@@ -272,7 +271,7 @@ async def _handle_reception(request):
             try:
                 body["params"] = json.loads(params_raw)
             except json.JSONDecodeError:
-                return relay_error(reason="invalid_request", msg="Invalid params JSON", status=400)
+                raise ExternalError("Invalid params JSON", reason="invalid_request")
 
         method = body.get("method")
         att_type = attachment_type_for_method(method)
@@ -287,15 +286,9 @@ async def _handle_reception(request):
         try:
             body = json.loads(raw)
         except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
-            return relay_error(reason="invalid_request", msg="Invalid JSON body", status=400)
-        try:
-            body = ext_dict("body", body)
-        except TypeError:
-            return relay_error(reason="invalid_request", msg="Invalid JSON body", status=400)
-    try:
-        body = _normalize_conductor_message_body(body)
-    except TypeError as e:
-        return relay_error(reason="invalid_request", msg=str(e), status=400)
+            raise ExternalError("Invalid JSON body", reason="invalid_request")
+        body = ext_dict("body", body)
+    body = _normalize_conductor_message_body(body)
 
     session = app["session"]
     consul_url = config.consul_url
@@ -324,10 +317,7 @@ async def _handle_reception(request):
         if settings is None:
             settings = {}
         else:
-            try:
-                settings = ext_dict("settings", settings)
-            except TypeError:
-                return relay_error(reason="invalid_request", msg="Invalid model settings", status=400)
+            settings = ext_dict("settings", settings)
         if not await db.ensure_model_lock(app, model_id):
             return relay_error(reason="model_locked", msg="Model is active on another station", status=503, retryable=True)
         async with instance_lock:
@@ -420,15 +410,7 @@ async def handle_event(request):
         if await db.is_duplicate_request(dedupe_key):
             return web.json_response({"result": 0, "msg": "Duplicate", "data": None}, status=200)
 
-    try:
-        body = await request.json()
-    except (json.JSONDecodeError, ValueError):
-        return relay_error(reason="invalid_request", msg="Invalid JSON body", status=400)
-    try:
-        body = ext_dict("body", body)
-    except TypeError:
-        return relay_error(reason="invalid_request", msg="Invalid JSON body", status=400)
-    body = dict(body)
+    body = dict(await read_json_object(request))
 
     session = app["session"]
     consul_url = config.consul_url
@@ -445,10 +427,7 @@ async def handle_event(request):
     if settings is None:
         settings = {}
     else:
-        try:
-            settings = ext_dict("settings", settings)
-        except TypeError:
-            return relay_error(reason="invalid_request", msg="Invalid model settings", status=400)
+        settings = ext_dict("settings", settings)
     instances = app['instances']
     instance_lock = app['instance_lock']
 
@@ -488,7 +467,6 @@ async def handle_event(request):
             chat_id=chat_id,
             acct_id=acct_id,
             request_id=request_id,
-            event_level=event_level,
         ),
     )
     delivery_resp = _instance_delivery_rejection_response(accepted)

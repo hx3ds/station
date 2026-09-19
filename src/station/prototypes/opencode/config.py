@@ -4,11 +4,12 @@ import shlex
 import shutil
 from dataclasses import dataclass
 
-from station.config.config import mapping_get
+from station.prototypes.boundary import ext_dict, ext_mapping_get
 from station.prototypes.fs_paths import write_atomic
 from station.prototypes.launch_settings import (
     LOCAL_LLM_PROVIDERS,
     collect_provider_env,
+    env_int,
     env_str,
     launch_sections,
     merge_launch_settings,
@@ -24,10 +25,7 @@ WORKSPACE_OVERRIDE_NAME = "opencode_workspace"
 PORT_ENV = "OPENCODE_BRIDGE_PORT"
 
 def _env_port():
-    raw = env_str(PORT_ENV)
-    if not raw:
-        return 0
-    return int(raw)
+    return env_int(PORT_ENV, 0)
 
 def is_windows_interop_path(path):
     normalized = path.replace("\\", "/").lower()
@@ -58,7 +56,7 @@ def _usable_linux_opencode(path):
     return resolved
 
 def _resolve_opencode_command(server):
-    explicit = mapping_get(server, "command", (str, list), None, allow_none=True)
+    explicit = ext_mapping_get(server, "command", (str, list), None, allow_none=True)
     if explicit is None or explicit == "" or explicit == []:
         explicit = env_str("OPENCODE_BRIDGE_OPENCODE_COMMAND")
         if explicit:
@@ -97,8 +95,6 @@ def _resolve_opencode_command(server):
         "or place a Linux binary at ~/.local/bin/opencode"
     )
 
-# Local OpenAI-compatible backends use a custom provider id so they are not
-# confused with OpenCode built-in providers.
 OPENCODE_LOCAL_PROVIDER = "local-llm"
 
 
@@ -140,7 +136,8 @@ def write_local_llm_opencode_config(path, *, settings):
     extra = dict(settings.opencode_overrides or {})
     extra_provider = extra.pop("provider", None)
     payload.update(extra)
-    if isinstance(extra_provider, dict):
+    if extra_provider is not None:
+        extra_provider = ext_dict("opencode provider override", extra_provider)
         merged = dict(payload.get("provider") or {})
         merged.update(extra_provider)
         payload["provider"] = merged
@@ -199,23 +196,23 @@ class OpenCodeLaunchSettings:
 
         workspace_dir = (
             (workspace_override.strip() if workspace_override else "")
-            or mapping_get(workspace, "dir", (str,), "")
+            or ext_mapping_get(workspace, "dir", (str,), "")
             or env_str("OPENCODE_BRIDGE_WORKSPACE")
             or default_workspace
         )
         workspace_path = os.path.expanduser(workspace_dir)
 
         hostname = (
-            mapping_get(server, "hostname", (str,), "")
+            ext_mapping_get(server, "hostname", (str,), "")
             or env_str("OPENCODE_BRIDGE_HOSTNAME")
             or "127.0.0.1"
         )
-        port = mapping_get(server, "port", (int,), None, allow_none=True)
+        port = ext_mapping_get(server, "port", (int,), None, allow_none=True)
         if port is None:
             port = _env_port()
 
         serve_args = parse_command_args(
-            mapping_get(server, "serve_args", (str, list), None, allow_none=True),
+            ext_mapping_get(server, "serve_args", (str, list), None, allow_none=True),
             "server.serve_args",
         )
         if not serve_args:
@@ -224,8 +221,8 @@ class OpenCodeLaunchSettings:
                 serve_args = shlex.split(raw_args)
 
         provider, model_id = split_provider_model(
-            mapping_get(model, "model", (str,), ""),
-            mapping_get(model, "provider", (str,), ""),
+            ext_mapping_get(model, "model", (str,), ""),
+            ext_mapping_get(model, "provider", (str,), ""),
         )
         if provider.lower() == "grok":
             provider = "xai"
@@ -253,8 +250,8 @@ class OpenCodeLaunchSettings:
             (local_llm_api_key or "local")
             if uses_local_llm
             else (
-                mapping_get(keys, "xai_api_key", (str,), "")
-                or mapping_get(model, "api_key", (str,), "")
+                ext_mapping_get(keys, "xai_api_key", (str,), "")
+                or ext_mapping_get(model, "api_key", (str,), "")
                 or env_str("XAI_API_KEY")
                 or env_str("GROK_API_KEY")
             )
@@ -272,15 +269,15 @@ class OpenCodeLaunchSettings:
             port=port,
             model=model_id,
             provider=provider,
-            agent=mapping_get(model, "agent", (str,), ""),
-            variant=mapping_get(model, "variant", (str,), ""),
-            approvals_mode=mapping_get(model, "approvals_mode", (str,), "always").lower(),
+            agent=ext_mapping_get(model, "agent", (str,), ""),
+            variant=ext_mapping_get(model, "variant", (str,), ""),
+            approvals_mode=ext_mapping_get(model, "approvals_mode", (str,), "always").lower(),
             server_password=(
-                mapping_get(server, "password", (str,), "")
+                ext_mapping_get(server, "password", (str,), "")
                 or env_str("OPENCODE_SERVER_PASSWORD")
             ),
             server_username=(
-                mapping_get(server, "username", (str,), "")
+                ext_mapping_get(server, "username", (str,), "")
                 or env_str("OPENCODE_SERVER_USERNAME")
                 or "opencode"
             ),

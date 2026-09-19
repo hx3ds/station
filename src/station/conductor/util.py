@@ -6,6 +6,7 @@ from pathlib import Path
 
 from aiohttp import web
 
+from station.errors import ExternalError
 from station.prototypes.boundary import ext_bool as _b_bool
 from station.prototypes.boundary import ext_int as _b_int
 from station.prototypes.boundary import ext_optional_id
@@ -27,14 +28,14 @@ def ext_str(value, name, *, default="", allow_none=True):
     if value is None:
         if allow_none:
             return default
-        raise TypeError(f"{name} is required")
+        raise ExternalError("%s is required" % name)
     return _b_str(name, value, default=default, strip=False)
 
 def ext_id(value, name, *, default="", allow_none=True):
     if value is None:
         if allow_none:
             return default
-        raise TypeError(f"{name} is required")
+        raise ExternalError("%s is required" % name)
     v = ext_optional_id(name, value)
     if isinstance(v, int):
         return str(v)
@@ -44,14 +45,14 @@ def ext_bool(value, name, *, default=False, allow_none=True):
     if value is None:
         if allow_none:
             return default
-        raise TypeError(f"{name} is required")
+        raise ExternalError("%s is required" % name)
     return _b_bool(name, value, default=default)
 
 def ext_int(value, name, *, default=0, allow_none=True):
     if value is None:
         if allow_none:
             return default
-        raise TypeError(f"{name} is required")
+        raise ExternalError("%s is required" % name)
     return _b_int(name, value, default=default)
 
 def ok(data=None, *, status=200, msg=None):
@@ -67,6 +68,14 @@ def err(msg, *, status=400, data=None):
     if data is not None:
         payload["data"] = data
     return web.json_response(payload, status=status)
+
+def catch_external(handler):
+    async def wrapped(request):
+        try:
+            return await handler(request)
+        except ExternalError as e:
+            return err(str(e), status=e.status)
+    return wrapped
 
 def normalize_http_url(raw):
     if raw is None:

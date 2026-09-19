@@ -101,21 +101,6 @@ class PiRpcProcess(JsonLineRpcProcess):
             body["images"] = images
         await self._command(body)
 
-    async def follow_up(self, message, *, images=None):
-        body = {"type": "follow_up", "message": message}
-        if images:
-            body["images"] = images
-        await self._command(body)
-
-    async def abort(self):
-        await self._command({"type": "abort"})
-
-    async def new_session(self):
-        return await self._command({"type": "new_session"})
-
-    async def get_state(self):
-        return await self._command({"type": "get_state"})
-
     async def get_last_assistant_text(self):
         data = await self._command({"type": "get_last_assistant_text"})
         if data is None:

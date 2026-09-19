@@ -15,6 +15,7 @@ from station.database.file_registry import (
     row_to_file_dict,
 )
 from station.database.postgres_database import PostgresDatabase
+from station.errors import ExternalError, InternalError
 from station import logger
 
 def _remove_path(path: str) -> None:
@@ -113,7 +114,7 @@ class Database(LocalConductorDatabaseMixin, AsyncDatabase):
 
     def insert_file(self, *, model_id, file_id, folder, kind, ext="", status="ready", original_name=None, mime_type=None, size_bytes=None, created_at=None, info=None, remote_file_id=None, url=None, chat_id=None, acct_id=None, server=None, remote_path=None):
         if not model_id:
-            raise ValueError("missing_model_id")
+            raise InternalError("missing_model_id")
         if created_at is None:
             created_at = time.time()
         try:
@@ -144,7 +145,7 @@ class Database(LocalConductorDatabaseMixin, AsyncDatabase):
                     ),
                 )
         except sqlite3.IntegrityError:
-            raise ValueError("file_id_exists")
+            raise ExternalError("file_id_exists")
 
     def get_file(self, file_id, *, model_id, include_remote=True):
         if not model_id or not file_id:
@@ -170,30 +171,6 @@ class Database(LocalConductorDatabaseMixin, AsyncDatabase):
                 vals,
             )
         return self.get_file(file_id, model_id=model_id, include_remote=False)
-
-    def list_files(self, *, model_id, kind=None, status=None, folder=None):
-        if not model_id:
-            return []
-        clauses = ["model_id = ?"]
-        args = [model_id]
-        if kind:
-            clauses.append("kind = ?")
-            args.append(kind)
-        if status:
-            clauses.append("status = ?")
-            args.append(status)
-        if folder:
-            clauses.append("folder = ?")
-            args.append(folder)
-        where = " WHERE " + " AND ".join(clauses)
-        with self._connect() as conn:
-            conn.row_factory = sqlite3.Row
-            cur = conn.execute(
-                f"SELECT * FROM files{where} ORDER BY created_at DESC",
-                args,
-            )
-            rows = cur.fetchall()
-        return [row_to_file_dict(r, include_remote=False) for r in rows]
 
     async def put_model(self, model_id, data):
         conductor_addr = data.get("conductor_address") or ""
@@ -349,7 +326,7 @@ class Database(LocalConductorDatabaseMixin, AsyncDatabase):
 
     async def put_inbound_pending(self, *, job_id: str, model_id: str, kind: str, payload: dict) -> None:
         if not job_id or not model_id or not kind:
-            raise ValueError("inbound_pending requires job_id, model_id, and kind")
+            raise InternalError("inbound_pending requires job_id, model_id, and kind")
         now = time.time()
         body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
 
@@ -469,7 +446,7 @@ async def create_database(
 
     if backend == "postgres":
         if not dsn:
-            raise ValueError("DB_DSN is required when DB_BACKEND=postgres")
+            raise ExternalError("DB_DSN is required when DB_BACKEND=postgres")
         db = await PostgresDatabase.create(dsn=dsn, enable_local_conductor=enable_local_conductor)
         if wipe_on_restart:
             await db.wipe_all()
@@ -482,4 +459,4 @@ async def create_database(
         logger.info("database connected backend=sqlite")
         return db
 
-    raise ValueError(f"Unsupported DB_BACKEND: {backend}")
+    raise ExternalError("Unsupported DB_BACKEND: %s" % backend)

@@ -3,7 +3,8 @@ import json
 
 from station.conductor.util import node_bin, whatsapp_bridge_dir
 from station import logger
-from station.prototypes.boundary import ext_bool, ext_dict, ext_float, ext_int, ext_list, ext_require, ext_str
+from station.errors import ExternalError
+from station.prototypes.boundary import ext_dict, ext_str
 
 class WhatsAppPairHandle:
     def __init__(self, proc):
@@ -119,7 +120,7 @@ class WhatsAppPairer:
                                 reason = ext_str('whatsapp pair reason', reason, strip=False)
                             await on_failed(reason, status=kind)
                             break
-                    except TypeError as exc:
+                    except ExternalError as exc:
                         logger.error(
                             "whatsapp pair bad event acct_id=%s error=%s",
                             acct_id,
@@ -136,7 +137,6 @@ class WhatsAppPairer:
                     raise
                 if err:
                     logger.warning("whatsapp pair stderr acct_id=%s", acct_id)
-                # Intentional stop() must not mark the account outdated.
                 if not finished and not handle._stopped and code not in (0, None):
                     await on_failed(err or f"bridge exit {code}", status="failed")
             except asyncio.CancelledError:

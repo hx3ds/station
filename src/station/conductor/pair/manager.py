@@ -5,7 +5,8 @@ import time
 from station.conductor.pair.whatsapp import WhatsAppPairer
 from station.conductor.platform_types import strip_qr_prefix
 from station import logger
-from station.prototypes.boundary import ext_bool, ext_dict, ext_float, ext_int, ext_list, ext_require, ext_str
+from station.errors import ExternalError
+from station.prototypes.boundary import ext_str
 
 class PairManager:
     def __init__(self, local_conductor):
@@ -28,12 +29,12 @@ class PairManager:
         platform = ext_str('platform', platform, strip=False)
         platform = strip_qr_prefix(platform)
         if not acct_id:
-            raise ValueError("acct_id is required")
+            raise ExternalError("acct_id is required")
         if not platform:
-            raise ValueError("platform is required")
+            raise ExternalError("platform is required")
         pairer = self._pairers.get(platform)
         if pairer is None:
-            raise ValueError(f"unsupported platform: {platform}")
+            raise ExternalError("unsupported platform: %s" % platform)
         key = self._key(acct_id, platform)
         async with self._lock:
             existing = self._sessions.get(key)
@@ -70,8 +71,6 @@ class PairManager:
                 )
 
             async def on_failed(reason, status="failed"):
-                # Ignore failures from cancelled/superseded pair attempts so a
-                # successful refresh cannot be overwritten as outdated.
                 async with self._lock:
                     if self._sessions.get(key) is not state:
                         return
@@ -107,7 +106,7 @@ class PairManager:
             async with self._lock:
                 if self._sessions.get(key) is state:
                     await self._cancel_locked(key)
-            raise ValueError(state.get("error") or f"qr not ready ({status})")
+            raise ExternalError(state.get("error") or "qr not ready (%s)" % status)
         return {
             "acct_id": acct_id,
             "platform": platform,

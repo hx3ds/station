@@ -5,7 +5,8 @@ import json
 import aiohttp
 
 from station import logger
-from station.prototypes.boundary import ext_bool, ext_dict, ext_float, ext_int, ext_list, ext_require, ext_str
+from station.errors import ExternalError
+from station.prototypes.boundary import ext_dict, ext_float, ext_list, ext_str
 
 def _extract_message_content_text(content):
     if type(content) is str:
@@ -77,22 +78,22 @@ async def _read_json_body(resp):
 def _error_message(data, raw, resp):
     def _fallback():
         if raw is not None:
-            raw = ext_str('error raw body', raw, strip=False)
-            text = raw.strip()
+            text = ext_str("error raw body", raw, strip=False).strip()
             if text:
                 return text
         reason = resp.reason
         if reason is None:
             return "Request failed"
-        reason = ext_str('response reason', reason, strip=False)
-        text = reason.strip()
+        text = ext_str("response reason", reason, strip=False).strip()
         return text if text else "Request failed"
 
     if data is None:
         return _fallback()
-    data = ext_dict('error response body', data)
+    data = ext_dict("error response body", data)
     err = data.get("error")
-    if isinstance(err, dict):
+    if err is None:
+        return _fallback()
+    if type(err) is dict:
         msg = err.get("message")
         if msg is None:
             msg = err.get("code")
@@ -100,13 +101,10 @@ def _error_message(data, raw, resp):
             msg = err.get("error")
         if msg is None:
             return _fallback()
-        msg = ext_str('error message', msg, strip=False)
-        return msg.strip()
-    if isinstance(err, str):
+        return ext_str("error message", msg, strip=False).strip()
+    if type(err) is str:
         return err.strip()
-    if err is not None:
-        raise TypeError("error must be dict or str")
-    return _fallback()
+    raise ExternalError("error must be dict or str")
 
 async def complete_chat(
     *,
@@ -122,15 +120,15 @@ async def complete_chat(
         return "Grok not configured (missing OAuth access token or api_key)."
 
     content = user_text if user_content is None else user_content
-    if isinstance(content, str):
+    if type(content) is str:
         content = content.strip()
         if not content:
             return "Grok request failed: empty prompt."
-    elif isinstance(content, list):
+    elif type(content) is list:
         if not content:
             return "Grok request failed: empty prompt."
     else:
-        raise TypeError("user_content must be str or list")
+        raise ExternalError("user_content must be str or list")
 
     messages = []
     if settings.system_prompt:
@@ -309,7 +307,7 @@ async def generate_image(
                 items = data.get("data")
                 try:
                     items = ext_list("image generation data", items)
-                except TypeError:
+                except ExternalError:
                     return b"", "", "Grok image generation returned no images."
                 if not items:
                     return b"", "", "Grok image generation returned no images."
@@ -361,13 +359,12 @@ GROK_SETTINGS_URL = "https://cli-chat-proxy.grok.com/v1/settings"
 def _money_val(obj):
     if obj is None:
         return None
-    if isinstance(obj, (int, float)) and not isinstance(obj, bool):
-        return float(obj)
-    obj = ext_dict("billing money value", obj)
-    val = obj.get("val")
-    if val is None:
-        return None
-    return float(ext_float("billing money val", val))
+    if type(obj) is dict:
+        val = ext_dict("billing money value", obj).get("val")
+        if val is None:
+            return None
+        return ext_float("billing money val", val)
+    return ext_float("billing money value", obj)
 
 def _format_usage_reply(data, *, plan_name=""):
     data = ext_dict('billing response', data)

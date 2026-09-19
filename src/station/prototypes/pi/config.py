@@ -3,7 +3,7 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-from station.config.config import mapping_get
+from station.prototypes.boundary import ext_mapping_get
 from station.prototypes.launch_settings import (
     collect_provider_env,
     env_str,
@@ -18,7 +18,7 @@ PI_ROOT = Path(__file__).resolve().parents[5] / "pi"
 PI_CODING_AGENT = PI_ROOT / "packages" / "coding-agent"
 
 def _resolve_pi_command(pi_section):
-    explicit = mapping_get(pi_section, "command", (str, list), None, allow_none=True)
+    explicit = ext_mapping_get(pi_section, "command", (str, list), None, allow_none=True)
     if explicit is None or explicit == "" or explicit == []:
         env_cmd = env_str("PI_BRIDGE_PI_COMMAND")
         if env_cmd:
@@ -83,30 +83,30 @@ class PiLaunchSettings:
         env_section = sections["env"]
 
         workspace_dir = (
-            mapping_get(workspace, "dir", (str,), "").strip()
+            ext_mapping_get(workspace, "dir", (str,), "").strip()
             or env_str("PI_BRIDGE_WORKSPACE")
             or default_workspace
         )
         workspace_path = Path(workspace_dir).expanduser()
 
         session_root = Path(
-            mapping_get(pi_section, "session_root", (str,), "").strip()
+            ext_mapping_get(pi_section, "session_root", (str,), "").strip()
             or env_str("PI_BRIDGE_SESSION_ROOT")
             or default_session_root
         ).expanduser()
         agent_home = Path(
-            mapping_get(pi_section, "home", (str,), "").strip()
+            ext_mapping_get(pi_section, "home", (str,), "").strip()
             or env_str("PI_BRIDGE_AGENT_HOME")
             or default_agent_home
         ).expanduser()
 
         provider, model_id = split_provider_model(
-            mapping_get(model, "model", (str,), "").strip(),
-            mapping_get(model, "provider", (str,), "").strip(),
+            ext_mapping_get(model, "model", (str,), "").strip(),
+            ext_mapping_get(model, "provider", (str,), "").strip(),
         )
 
         rpc_args = parse_command_args(
-            mapping_get(pi_section, "rpc_args", (str, list), None, allow_none=True),
+            ext_mapping_get(pi_section, "rpc_args", (str, list), None, allow_none=True),
             "pi.rpc_args",
         )
         if not rpc_args:
@@ -114,7 +114,7 @@ class PiLaunchSettings:
             if raw_args:
                 rpc_args = shlex.split(raw_args)
 
-        no_session = mapping_get(pi_section, "no_session", (bool,), False)
+        no_session = ext_mapping_get(pi_section, "no_session", (bool,), False)
         if env_str("PI_BRIDGE_NO_SESSION").lower() in {"1", "true", "yes"}:
             no_session = True
 
@@ -133,7 +133,7 @@ class PiLaunchSettings:
             agent_home=agent_home,
             model=model_id,
             provider=provider,
-            thinking_level=mapping_get(model, "thinking_level", (str,), "").strip(),
+            thinking_level=ext_mapping_get(model, "thinking_level", (str,), "").strip(),
             extra_env=collect_provider_env(keys, env_section),
             rpc_args=rpc_args,
             no_session=no_session,

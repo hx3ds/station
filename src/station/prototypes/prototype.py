@@ -1,8 +1,8 @@
 from aiohttp import web
 from station.client.conductor import send_proxy, send_outbound
+from station.errors import ExternalError, InternalError
 from station.prototypes.attachments import (
     PrototypeAttachments,
-    attachment_summary_text,
     find_attachment,
     normalize_attachments,
 )
@@ -31,9 +31,9 @@ class Prototype(PrototypeEcho, PrototypeWebRTC, PrototypeDiscordVoice, Prototype
         client_context=None,
     ):
         if prototype_id is None:
-            raise ValueError("prototype_id is required")
+            raise InternalError("prototype_id is required")
         if model_id is None:
-            raise ValueError("model_id is required")
+            raise InternalError("model_id is required")
         self.app = app
         self.prototype_id = prototype_id
         self.model_id = model_id
@@ -46,7 +46,7 @@ class Prototype(PrototypeEcho, PrototypeWebRTC, PrototypeDiscordVoice, Prototype
             registry = app["tenants"]
             tenant = registry.get(prototype_id)
             if tenant is None or tenant.client_context is None:
-                raise ValueError("client_context required")
+                raise InternalError("client_context required")
             self.client_context = tenant.client_context
         self._fs = None
         self._settings = None
@@ -128,9 +128,6 @@ class Prototype(PrototypeEcho, PrototypeWebRTC, PrototypeDiscordVoice, Prototype
     def _find_attachment(self, attachments, *, types=None, require_file_id=False):
         return find_attachment(attachments, types=types, require_file_id=require_file_id)
 
-    def _attachment_summary(self, attachments, *, limit=5):
-        return attachment_summary_text(attachments, limit=limit)
-
     async def _ensure_attachment_ready(self, attachment):
         file_id = attachment.get("file_id")
         if not file_id:
@@ -149,63 +146,6 @@ class Prototype(PrototypeEcho, PrototypeWebRTC, PrototypeDiscordVoice, Prototype
         args = parts[1] if len(parts) > 1 else ""
         return cmd, args
 
-    def _inbound_text(self, data):
-        return validate_inbound_message_fields(data)["inbound_text"]
-
-    def _inbound_meta_from_fields(self, fields):
-        return {
-            "text": fields["inbound_text"],
-            "reply_to": fields["msg_id"],
-            "platform": fields["platform"],
-            "chat_type": fields["chat_type"],
-        }
-
-    def _inbound_meta(self, data):
-        return self._inbound_meta_from_fields(validate_inbound_message_fields(data))
-
-    async def _inbound_gate(self, data, model_id, model_settings, *, chat_id=None, acct_id=None, request_id=None):
-        return await self._prepare_inbound(
-            data,
-            model_id,
-            model_settings,
-            chat_id=chat_id,
-            acct_id=acct_id,
-            request_id=request_id,
-        )
-
-    async def _parse_inbound_message(self, data, *, materialize_attachments=False):
-        fields = validate_inbound_message_fields(data)
-        attachments = normalize_attachments(fields["attachments"])
-        if materialize_attachments:
-            attachments = await self._materialize_attachments(attachments)
-        return fields, attachments
-
-    async def _open_inbound_message(
-        self,
-        data,
-        model_id,
-        model_settings,
-        *,
-        chat_id=None,
-        acct_id=None,
-        request_id=None,
-        materialize_attachments=True,
-    ):
-        if await self._inbound_gate(
-            data,
-            model_id,
-            model_settings,
-            chat_id=chat_id,
-            acct_id=acct_id,
-            request_id=request_id,
-        ):
-            return None
-        fields, attachments = await self._parse_inbound_message(
-            data,
-            materialize_attachments=materialize_attachments,
-        )
-        return fields, attachments, self._inbound_meta_from_fields(fields)
-
     async def _open_inbound_context(
         self,
         data,
@@ -215,20 +155,20 @@ class Prototype(PrototypeEcho, PrototypeWebRTC, PrototypeDiscordVoice, Prototype
         chat_id=None,
         acct_id=None,
         request_id=None,
-        materialize_attachments=True,
     ):
-        opened = await self._open_inbound_message(
+        if await self._prepare_inbound(
             data,
             model_id,
             model_settings,
             chat_id=chat_id,
             acct_id=acct_id,
             request_id=request_id,
-            materialize_attachments=materialize_attachments,
-        )
-        if opened is None:
+        ):
             return None
-        fields, attachments, _meta = opened
+        fields = validate_inbound_message_fields(data)
+        attachments = await self._materialize_attachments(
+            normalize_attachments(fields["attachments"])
+        )
         return InboundMessageContext(
             data=data,
             fields=fields,
@@ -243,7 +183,7 @@ class Prototype(PrototypeEcho, PrototypeWebRTC, PrototypeDiscordVoice, Prototype
     def _passes_inbound_guards(self, ctx):
         acct_id = ext_str("acct_id", ctx.acct_id)
         if not acct_id:
-            raise ValueError("acct_id is required")
+            raise ExternalError("acct_id is required")
         ctx.acct_id = acct_id
         if not ctx.text and not ctx.attachments and ctx.data.get("raw") is None:
             return False
@@ -382,10 +322,7 @@ class Prototype(PrototypeEcho, PrototypeWebRTC, PrototypeDiscordVoice, Prototype
                 chat_type=fields["chat_type"],
             )
 
-    def _event_log_label(self):
-        return self.__class__.__name__
-
-    async def handle_event(self, data, model_id, model_settings, chat_id=None, acct_id=None, request_id=None, event_level=None):
+    async def handle_event(self, data, model_id, model_settings, chat_id=None, acct_id=None, request_id=None):
         data = validate_inbound_data(data, label="event data")
         logger.debug("event received model_id=%s", model_id)
         chat_opened = data.get("chat_opened")
@@ -402,13 +339,16 @@ class Prototype(PrototypeEcho, PrototypeWebRTC, PrototypeDiscordVoice, Prototype
             )
 
     async def handle_pause(self, request):
-        return web.json_response({"result": 1, "msg": "Model does not support pause", "data": None}, status=400)
+        raise ExternalError("Model does not support pause")
 
     async def handle_resume(self, request):
-        return web.json_response({"result": 1, "msg": "Model does not support resume", "data": None}, status=400)
+        raise ExternalError("Model does not support resume")
 
     async def handle_rewind(self, request):
-        return web.json_response({"result": 1, "msg": "Model does not support rewind", "data": None}, status=400)
+        raise ExternalError("Model does not support rewind")
+
+    async def handle_admin_memory(self, body):
+        raise ExternalError("Model does not support admin memory")
 
     async def reload(self, model_settings=None):
         self._model_settings = model_settings

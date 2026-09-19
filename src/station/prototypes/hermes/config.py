@@ -1,7 +1,9 @@
 from dataclasses import dataclass
 from pathlib import Path
+import json
 
-from station.config.config import mapping_get, require_type
+from station.errors import ExternalError
+from station.prototypes.boundary import ext_dict, ext_mapping_get, ext_require, ext_str
 from station.prototypes.launch_settings import (
     XAI_PROVIDERS,
     apply_local_provider_env,
@@ -30,24 +32,22 @@ def load_saved_provider(storage_dir):
     if not path.is_file():
         return None
     try:
-        import json
-
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    if not isinstance(data, dict):
-        return None
+    except json.JSONDecodeError:
+        raise ExternalError("hermes config is not valid JSON")
+    data = ext_dict("hermes config", data)
     model = data.get("model")
-    if not isinstance(model, dict):
+    if model is None:
         return None
-    provider = str(model.get("provider") or "").strip()
+    model = ext_dict("hermes config model", model)
+    provider = ext_str("hermes config model.provider", model.get("provider"))
     if provider not in DEVICE_CODE_PROVIDERS and provider not in XAI_PROVIDERS:
         return None
-    return {"provider": provider, "model": str(model.get("default") or "").strip()}
+    return {"provider": provider, "model": ext_str("hermes config model.default", model.get("default"))}
 
 
 def _resolve_python(hermes):
-    explicit = mapping_get(hermes, "python", (str,), "").strip()
+    explicit = ext_mapping_get(hermes, "python", (str,), "").strip()
     if explicit:
         return explicit
     for key in ("HERMES_BRIDGE_HERMES_PYTHON", "HERMES_PYTHON", "PYTHON"):
@@ -126,26 +126,26 @@ class HermesLaunchSettings:
         env_section = sections["env"]
         local_llm = sections["local_llm"]
         config_overrides = dict(sections["config"])
-        disabled_toolsets = mapping_get(config_overrides, "disabled_toolsets", (list,), None, allow_none=True)
+        disabled_toolsets = ext_mapping_get(config_overrides, "disabled_toolsets", (list,), None, allow_none=True)
         if disabled_toolsets is None:
-            disabled_toolsets = mapping_get(model, "disabled_toolsets", (list,), [])
+            disabled_toolsets = ext_mapping_get(model, "disabled_toolsets", (list,), [])
         disabled_toolsets = [
-            require_type("disabled_toolsets[]", item, (str,)).strip()
+            ext_require("disabled_toolsets[]", item, (str,)).strip()
             for item in disabled_toolsets
         ]
         disabled_toolsets = [item for item in disabled_toolsets if item]
         config_overrides["disabled_toolsets"] = disabled_toolsets
         if "memory_enabled" not in config_overrides and "memory_enabled" in model:
-            config_overrides["memory_enabled"] = mapping_get(model, "memory_enabled", (bool,), False)
+            config_overrides["memory_enabled"] = ext_mapping_get(model, "memory_enabled", (bool,), False)
 
         hermes_root = Path(
-            mapping_get(hermes, "root", (str,), "").strip()
+            ext_mapping_get(hermes, "root", (str,), "").strip()
             or env_str("HERMES_BRIDGE_HERMES_ROOT")
             or str(HERMES_ROOT)
         ).expanduser()
 
         workspace_dir = (
-            mapping_get(hermes, "workspace", (str,), "").strip()
+            ext_mapping_get(hermes, "workspace", (str,), "").strip()
             or env_str("HERMES_BRIDGE_WORKSPACE")
             or default_workspace
         )
@@ -153,8 +153,8 @@ class HermesLaunchSettings:
         voice_reply_mode, voice_delivery_method = voice_settings_from_mapping(voice)
 
         provider, model_id = split_provider_model(
-            mapping_get(model, "model", (str,), "").strip(),
-            mapping_get(model, "provider", (str,), "").strip(),
+            ext_mapping_get(model, "model", (str,), "").strip(),
+            ext_mapping_get(model, "provider", (str,), "").strip(),
         )
         saved = load_saved_provider(default_workspace)
         if saved is not None:
@@ -190,9 +190,9 @@ class HermesLaunchSettings:
             workspace_dir=workspace_dir,
             model=model_id,
             provider=provider,
-            reasoning_effort=mapping_get(model, "reasoning_effort", (str,), "").strip(),
-            fast=mapping_get(model, "fast", (bool,), False),
-            approvals_mode=mapping_get(model, "approvals_mode", (str,), "").strip() or "always",
+            reasoning_effort=ext_mapping_get(model, "reasoning_effort", (str,), "").strip(),
+            fast=ext_mapping_get(model, "fast", (bool,), False),
+            approvals_mode=ext_mapping_get(model, "approvals_mode", (str,), "").strip() or "always",
             voice_reply_mode=voice_reply_mode,
             voice_delivery_method=voice_delivery_method,
             extra_env=extra_env,

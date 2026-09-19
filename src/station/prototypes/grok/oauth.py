@@ -6,7 +6,8 @@ from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
 from station import logger
-from station.prototypes.boundary import ext_bool, ext_dict, ext_float, ext_int, ext_list, ext_require, ext_str
+from station.errors import ExternalError
+from station.prototypes.boundary import ext_dict, ext_float, ext_str
 
 XAI_OAUTH_ISSUER = "https://auth.x.ai"
 XAI_OAUTH_DISCOVERY_URL = "%s/.well-known/openid-configuration" % XAI_OAUTH_ISSUER
@@ -53,14 +54,14 @@ def _validate_xai_endpoint(url):
     parsed = urlparse(url)
     host = (parsed.hostname or "").lower()
     if parsed.scheme != "https" or (host != "x.ai" and not host.endswith(".x.ai")):
-        raise ValueError("xAI OAuth discovery returned an unexpected endpoint: %s" % url)
+        raise ExternalError("xAI OAuth discovery returned an unexpected endpoint: %s" % url)
     return url
 
 def _http_json(method, url, *, headers=None, body=None, timeout=30.0):
     status, data = _http_json_status(method, url, headers=headers, body=body, timeout=timeout)
     if status < 200 or status >= 300:
         detail = ""
-        if isinstance(data, dict):
+        if type(data) is dict:
             error_description = data.get("error_description")
             error = data.get("error")
             if error_description is not None:
@@ -71,10 +72,10 @@ def _http_json(method, url, *, headers=None, body=None, timeout=30.0):
                 detail = error_description
             elif error:
                 detail = error
-        elif isinstance(data, str):
+        elif type(data) is str:
             detail = data
         elif data is not None:
-            raise TypeError("oauth error body must be dict or str")
+            raise ExternalError("oauth error body must be dict or str")
         raise RuntimeError("xAI OAuth HTTP %s%s" % (status, (": " + detail) if detail else ""))
     return data
 
@@ -227,7 +228,7 @@ def begin_device_login():
     interval = ext_float('interval', interval)
     interval = int(interval)
     if interval <= 0:
-        raise ValueError("interval must be > 0")
+        raise ExternalError("interval must be > 0")
     return PendingDeviceLogin(
         device_code=device_code,
         user_code=user_code,
@@ -272,7 +273,7 @@ def poll_device_code_token(pending, *, sleep=None, now_ms=None):
 
         error = ""
         error_description = ""
-        if isinstance(data, dict):
+        if type(data) is dict:
             raw_error = data.get("error", "")
             raw_description = data.get("error_description", "")
             raw_error = ext_str('oauth error', raw_error, strip=False)
@@ -293,12 +294,12 @@ def poll_device_code_token(pending, *, sleep=None, now_ms=None):
             raise RuntimeError("xAI device code expired - please re-run /login")
         if error_description or error:
             detail = error_description or error
-        elif isinstance(data, str):
+        elif type(data) is str:
             detail = data
-        elif isinstance(data, dict) or data is None:
+        elif data is None:
             detail = ""
         else:
-            raise TypeError("oauth poll error body must be dict or str")
+            raise ExternalError("oauth poll error body must be dict or str")
         raise RuntimeError("xAI device token exchange failed (%s)%s" % (status, (": " + detail) if detail else ""))
 
     raise RuntimeError("xAI device authorization timed out")

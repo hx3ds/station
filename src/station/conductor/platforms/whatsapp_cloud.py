@@ -15,9 +15,10 @@ from station.conductor.crypto import decrypt_if_encrypted
 from station.conductor.platforms.base import LocalPlatformAdapter
 from station.conductor.platforms import guidance
 from station.conductor.platforms.policy import media_ref_action
-from station.conductor.util import constant_time_equal, err, ext_str, ext_id, ext_int
+from station.conductor.util import constant_time_equal, err, ext_str, ext_id, ext_int, catch_external
 from station import logger
-from station.prototypes.boundary import ext_dict, ext_float, ext_list, ext_require
+from station.errors import ExternalError
+from station.prototypes.boundary import ext_dict, ext_float, ext_list
 
 DEFAULT_API_VERSION = "v21.0"
 GRAPH_API_BASE = "https://graph.facebook.com"
@@ -89,7 +90,7 @@ async def _read_limited_request_body(request, max_bytes):
     except asyncio.IncompleteReadError as exc:
         body = exc.partial
     if len(body) > max_bytes:
-        raise ValueError("payload too large")
+        raise ExternalError("payload too large", status=413)
     return body
 
 class WhatsAppCloudIO:
@@ -343,7 +344,7 @@ class WhatsAppCloudIO:
             body = await resp.json(content_type=None)
         try:
             body = ext_dict("whatsapp_cloud media body", body)
-        except TypeError:
+        except ExternalError:
             return None
         return ext_id(body.get("id"), "id").strip() or None
 
@@ -595,7 +596,7 @@ class WhatsAppCloudIO:
         elif msg_type == "reaction":
             reaction = raw_message.get("reaction")
             if reaction is None:
-                raise TypeError("whatsapp_cloud reaction required")
+                raise ExternalError("whatsapp_cloud reaction required")
             reaction = ext_dict('whatsapp_cloud reaction', reaction)
             emoji = ext_str(reaction.get("emoji"), "emoji").strip()
             react_to = ext_id(reaction.get("message_id"), "message_id").strip()
@@ -843,21 +844,15 @@ class WhatsAppCloudAdapter(LocalPlatformAdapter):
         app_secret = creds.get("app_secret") or ""
         if not app_secret:
             return web.Response(status=503, text="app_secret not configured")
-        try:
-            raw = await _read_limited_request_body(request, WEBHOOK_MAX_BODY_BYTES)
-        except ValueError:
-            return web.Response(status=413)
+        raw = await _read_limited_request_body(request, WEBHOOK_MAX_BODY_BYTES)
         signature = ext_str(request.headers.get("X-Hub-Signature-256"), "X-Hub-Signature-256")
         if not self.io.verify_signature(app_secret=app_secret, raw_body=raw, header=signature):
             return web.Response(status=401)
         try:
             payload = json.loads(raw)
         except json.JSONDecodeError:
-            return web.Response(status=400)
-        try:
-            payload = ext_dict("payload", payload)
-        except TypeError:
-            return web.Response(status=400)
+            raise ExternalError("Invalid JSON body")
+        payload = ext_dict("payload", payload)
         ok = await self.io.process_payload(acct_id=acct_id, payload=payload)
         if not ok:
             return web.Response(status=500, text="delivery failed")
@@ -865,4 +860,4 @@ class WhatsAppCloudAdapter(LocalPlatformAdapter):
 
     def register_routes(self, app):
         app.router.add_get("/webhook/whatsapp_cloud/{acct_id}", self.handle_verify)
-        app.router.add_post("/webhook/whatsapp_cloud/{acct_id}", self.handle_webhook)
+        app.router.add_post("/webhook/whatsapp_cloud/{acct_id}", catch_external(self.handle_webhook))

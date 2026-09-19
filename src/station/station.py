@@ -20,6 +20,8 @@ from station.tenants import Tenant, TenantRegistry, TokenState
 from station.prototypes.registry import register_kind
 
 from station import logger
+from station.api.http import log_caught
+from station.errors import ExternalError
 from station.prototypes.boundary import ext_bool, ext_dict, ext_int, ext_require, ext_str
 
 class Station:
@@ -57,7 +59,7 @@ class Station:
         if db_backend is not None:
             db_backend = ext_str("db_backend", db_backend, default="")
             if not db_backend:
-                raise TypeError("db_backend must be non-empty str")
+                raise ExternalError("db_backend must be non-empty str")
             self.config.database.backend = db_backend.lower()
         if db_dsn is not None:
             self.config.database.dsn = ext_str("db_dsn", db_dsn, default="").strip() or None
@@ -90,21 +92,21 @@ class Station:
                 kind = primary.kind or "station"
             kind = ext_str("prototype_kind", kind, default="")
             if not kind:
-                raise TypeError("prototype_kind must be non-empty str")
+                raise ExternalError("prototype_kind must be non-empty str")
             register_kind(kind, prototype)
             primary.kind = kind
             self._primary_prototype_class = prototype
         elif prototype_kind is not None:
             kind = ext_str("prototype_kind", prototype_kind, default="")
             if not kind:
-                raise TypeError("prototype_kind must be non-empty str")
+                raise ExternalError("prototype_kind must be non-empty str")
             primary.kind = kind
 
         self.prototype_id = primary.id
         if self.prototype_id is None:
-            raise ValueError("prototypes[0].id is required")
+            raise ExternalError("prototypes[0].id is required")
         if not primary.token:
-            raise ValueError("prototypes[0].token is required")
+            raise ExternalError("prototypes[0].token is required")
 
         self.db = None
         self.app = None
@@ -153,6 +155,12 @@ class Station:
             trust_env=False,
         )
 
+    async def _cleanup(self, where, coro):
+        try:
+            await coro
+        except Exception as e:
+            log_caught(self.logger, e, where=where)
+
     async def _lifecycle_manager(self, app):
         poller_gen = None
         lc = app.get("local_conductor")
@@ -172,34 +180,13 @@ class Station:
                 app["_local_conductor_poller"] = None
 
             for instance in list(app["instances"].values()):
-                try:
-                    await instance.stop()
-                except Exception as e:
-                    self.logger.error("unexpected where=cleanup instance stop error=%s", e, exc_info=e)
+                await self._cleanup("cleanup instance stop", instance.stop())
 
-            try:
-                await app["gateway_processes"].close_all()
-            except Exception as e:
-                self.logger.error("unexpected where=cleanup gateway_processes error=%s", e, exc_info=e)
-
-            try:
-                await app["discord_voice"].close()
-            except Exception as e:
-                self.logger.error("unexpected where=cleanup discord_voice error=%s", e, exc_info=e)
-
-            try:
-                await app["db"].release_all_model_locks(app)
-            except Exception as e:
-                self.logger.error("unexpected where=cleanup release locks error=%s", e, exc_info=e)
-            try:
-                await app["db"].close()
-            except Exception as e:
-                self.logger.error("unexpected where=cleanup database error=%s", e, exc_info=e)
-
-            try:
-                await app["session"].close()
-            except Exception as e:
-                self.logger.error("unexpected where=cleanup session error=%s", e, exc_info=e)
+            await self._cleanup("cleanup gateway_processes", app["gateway_processes"].close_all())
+            await self._cleanup("cleanup discord_voice", app["discord_voice"].close())
+            await self._cleanup("cleanup release locks", app["db"].release_all_model_locks(app))
+            await self._cleanup("cleanup database", app["db"].close())
+            await self._cleanup("cleanup session", app["session"].close())
 
             self.logger.info("station stopped")
 
@@ -243,7 +230,7 @@ class Station:
                 result["unchanged"],
             )
         except Exception as e:
-            self.logger.error("unexpected where=sighup reload error=%s", e, exc_info=e)
+            log_caught(self.logger, e, where="sighup reload")
 
     async def _register_sighup(self, app):
         loop = asyncio.get_running_loop()
@@ -264,24 +251,24 @@ class Station:
         try:
             fs_root = self.config.fs_root
             if not fs_root:
-                raise ValueError("FS_ROOT is required")
+                raise ExternalError("FS_ROOT is required")
             os.makedirs(fs_root, exist_ok=True)
 
             consul_url = self.config.consul_url
             if not consul_url:
-                raise ValueError("CONSUL_URL is required (env or config.toml).")
+                raise ExternalError("CONSUL_URL is required (env or config.toml).")
 
             primary_cfg = self.config.prototype
             primary_token = primary_cfg.token
             if not primary_token:
-                raise ValueError("prototypes[0].token is required")
+                raise ExternalError("prototypes[0].token is required")
 
             session = self._make_session()
             primary_fetched_ok, primary_fetched = await self._fetch_prototype_with_retry(
                 session, consul_url, primary_token
             )
             if not primary_fetched_ok:
-                raise RuntimeError("fetch_prototype failed (consul_url=%s)" % consul_url)
+                raise ExternalError("fetch_prototype failed (consul_url=%s)" % consul_url)
 
             if primary_fetched.get("prototype_id") is not None:
                 self.prototype_id = ext_int("prototype_id", primary_fetched["prototype_id"])
@@ -293,22 +280,22 @@ class Station:
 
             if not self.config.host or not self.config.port:
                 if not prototype_access_point:
-                    raise TypeError("Prototype access_point from Consul must be a non-empty string.")
+                    raise ExternalError("Prototype access_point from Consul must be a non-empty string.")
 
                 host, port = self.config._parse_access_point_host_port(prototype_access_point)
                 if not host or not port:
-                    raise RuntimeError(f"Invalid prototype access_point: {prototype_access_point}")
+                    raise ExternalError("Invalid prototype access_point: %s" % prototype_access_point)
 
                 self.config.host = host
                 self.config.port = port
 
             if not self.config.host or not self.config.port:
-                raise RuntimeError(
+                raise ExternalError(
                     "Station listen address not resolved. Set SERVER_HOST/SERVER_PORT (env or config.toml), or pass --host/--port."
                 )
 
             if "is_local" not in primary_fetched:
-                raise TypeError("fetch_prototype is_local is required")
+                raise ExternalError("fetch_prototype is_local is required")
             primary_is_local = ext_bool("is_local", primary_fetched["is_local"])
 
             self.recorder = Recorder("station", self.config.recorder, port=self.config.port)
@@ -363,12 +350,12 @@ class Station:
                 else:
                     fetched_ok, fetched = await self._fetch_prototype_with_retry(session, consul_url, token)
                     if not fetched_ok:
-                        raise RuntimeError("fetch_prototype failed for prototype_id=%s" % pid)
+                        raise ExternalError("fetch_prototype failed for prototype_id=%s" % pid)
                     if fetched.get("prototype_id") is not None:
                         pid = ext_int("prototype_id", fetched["prototype_id"])
                         cfg.id = pid
                     if "is_local" not in fetched:
-                        raise TypeError("fetch_prototype is_local is required")
+                        raise ExternalError("fetch_prototype is_local is required")
                     is_local = ext_bool("is_local", fetched["is_local"])
 
                 token_state = TokenState(token)
@@ -417,7 +404,6 @@ class Station:
             primary_cfg.kind = primary_tenant.kind
 
             self.app["tenants"] = registry
-            self.app["prototype_is_local"] = registry.any_local()
             self.app["local_conductor"] = None
             self.app["_local_conductor_routes"] = False
             ensure_local_conductor(self.app)
@@ -435,16 +421,12 @@ class Station:
             session = None
             return self.app
         except Exception as e:
-            logger.error("startup failed error=%s", e, exc_info=e)
+            log_caught(logger, e, where="startup")
             if session is not None:
                 try:
                     await session.close()
                 except Exception as close_err:
-                    logger.error(
-                        "unexpected where=startup session close error=%s",
-                        close_err,
-                        exc_info=close_err,
-                    )
+                    log_caught(logger, close_err, where="startup session close")
             raise
 
     def start(self):

@@ -1,48 +1,38 @@
-import json
 import time
 from aiohttp import web
 
+from station.api.http import read_json_object
 from station.api.tenant_auth import authorize_request
-from station.prototypes.boundary import ext_dict, ext_int, ext_str
+from station.errors import ExternalError
+from station.prototypes.boundary import ext_int, ext_str
 
 async def handle_webrtc_offer(request):
     app = request.app
 
     model_id = request.match_info.get("model_id")
     if not model_id:
-        return web.json_response({"result": 1, "msg": "Missing model_id", "data": None}, status=400)
+        raise ExternalError("Missing model_id")
 
     tenant = authorize_request(request)
     if tenant is None:
-        return web.json_response({"result": 1, "msg": "Unauthorized", "data": None}, status=401)
+        raise ExternalError("Unauthorized", status=401)
 
     db = app["db"]
     info = await db.get_prototype_info(tenant.id)
     if info is None:
-        return web.json_response({"result": 1, "msg": "Prototype does not support calls", "data": None}, status=403)
+        raise ExternalError("Prototype does not support calls", status=403)
     call_support = info.get("call_support")
     if call_support is not True:
-        return web.json_response({"result": 1, "msg": "Prototype does not support calls", "data": None}, status=403)
+        raise ExternalError("Prototype does not support calls", status=403)
 
-    try:
-        body = await request.json()
-    except (json.JSONDecodeError, ValueError):
-        return web.json_response({"result": 1, "msg": "Invalid JSON body", "data": None}, status=400)
-    try:
-        body = ext_dict("body", body)
-    except TypeError:
-        return web.json_response({"result": 1, "msg": "Invalid JSON body", "data": None}, status=400)
-
-    try:
-        sdp = ext_str("sdp", body.get("sdp"), default="", strip=False)
-    except TypeError:
-        return web.json_response({"result": 1, "msg": "Missing sdp", "data": None}, status=400)
+    body = await read_json_object(request)
+    sdp = ext_str("sdp", body.get("sdp"), default="", strip=False)
     if not sdp.strip():
-        return web.json_response({"result": 1, "msg": "Missing sdp", "data": None}, status=400)
+        raise ExternalError("Missing sdp")
 
     webrtc = app["webrtc"]
     if webrtc is None:
-        return web.json_response({"result": 1, "msg": "WebRTC not enabled", "data": None}, status=501)
+        raise ExternalError("WebRTC not enabled", status=501)
 
     chat_id = request.headers.get("X-Chat-Id")
     if chat_id is None:
@@ -59,16 +49,10 @@ async def handle_webrtc_offer(request):
     if call_id is None:
         call_id = ""
     else:
-        try:
-            call_id = ext_str("call_id", call_id, default="", strip=False)
-        except TypeError:
-            return web.json_response({"result": 1, "msg": "Invalid call_id", "data": None}, status=400)
+        call_id = ext_str("call_id", call_id, default="", strip=False)
     call_version = body.get("version")
     if call_version is not None:
-        try:
-            call_version = ext_int("version", call_version)
-        except TypeError:
-            return web.json_response({"result": 1, "msg": "Invalid version", "data": None}, status=400)
+        call_version = ext_int("version", call_version)
 
     answer_sdp = await webrtc.handle_offer(
         offer_sdp=sdp,

@@ -2,7 +2,8 @@ import asyncio
 import time
 
 from station import logger
-from station.prototypes.boundary import ext_bool, ext_dict, ext_float, ext_int, ext_list, ext_require, ext_str
+from station.errors import ExternalError
+from station.prototypes.boundary import ext_dict, ext_int, ext_list, ext_str
 
 def _frame_to_s16le_mono_48k(frame, audioop):
     import numpy as np
@@ -441,7 +442,7 @@ class WebRTCService:
             await pc.setLocalDescription(answer)
         except ValueError as e:
             await self._close_pc(key)
-            raise RuntimeError("failed to set local description: %s" % e) from e
+            raise ExternalError("failed to set local description: %s" % e) from e
         except Exception as e:
             logger.error("unexpected where=webrtc setLocalDescription call_id=%s error=%s", call_id, e, exc_info=e)
             await self._close_pc(key)

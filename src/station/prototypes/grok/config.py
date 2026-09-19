@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 
-from station.config.config import mapping_get
+from station.errors import ExternalError
+from station.prototypes.boundary import ext_mapping_get
 from station.prototypes.launch_settings import launch_sections, merge_launch_settings, voice_settings_from_mapping
 
 @dataclass(slots=True)
@@ -41,29 +42,29 @@ class GrokLaunchSettings:
             delivery_method_default="audio",
         )
 
-        sample_rate = mapping_get(realtime, "sample_rate", (int,), 24000)
+        sample_rate = ext_mapping_get(realtime, "sample_rate", (int,), 24000)
         if sample_rate not in {8000, 16000, 22050, 24000, 32000, 44100, 48000}:
-            raise ValueError("realtime.sample_rate must be a supported PCM rate")
+            raise ExternalError("realtime.sample_rate must be a supported PCM rate")
 
-        tts_voice_id = mapping_get(voice, "tts_voice_id", (str,), "eve")
-        realtime_voice = mapping_get(realtime, "voice", (str,), tts_voice_id)
+        tts_voice_id = ext_mapping_get(voice, "tts_voice_id", (str,), "eve")
+        realtime_voice = ext_mapping_get(realtime, "voice", (str,), tts_voice_id)
 
         return cls(
-            model=mapping_get(model, "model", (str,), "grok-4.5"),
-            base_url=mapping_get(model, "base_url", (str,), "https://api.x.ai/v1").rstrip("/"),
-            api_key=mapping_get(model, "api_key", (str,), ""),
-            system_prompt=mapping_get(model, "system_prompt", (str,), ""),
-            reuse_grok_cli_auth=mapping_get(oauth, "reuse_grok_cli_auth", (bool,), True),
-            temperature=mapping_get(sampling, "temperature", (int, float), None, allow_none=True),
-            max_tokens=mapping_get(sampling, "max_tokens", (int,), None, allow_none=True),
+            model=ext_mapping_get(model, "model", (str,), "grok-4.5"),
+            base_url=ext_mapping_get(model, "base_url", (str,), "https://api.x.ai/v1").rstrip("/"),
+            api_key=ext_mapping_get(model, "api_key", (str,), ""),
+            system_prompt=ext_mapping_get(model, "system_prompt", (str,), ""),
+            reuse_grok_cli_auth=ext_mapping_get(oauth, "reuse_grok_cli_auth", (bool,), True),
+            temperature=ext_mapping_get(sampling, "temperature", (int, float), None, allow_none=True),
+            max_tokens=ext_mapping_get(sampling, "max_tokens", (int,), None, allow_none=True),
             voice_reply_mode=voice_reply_mode,
             voice_delivery_method=voice_delivery_method,
             tts_voice_id=tts_voice_id,
-            tts_language=mapping_get(voice, "tts_language", (str,), "en"),
-            realtime_model=mapping_get(realtime, "model", (str,), "grok-voice-latest"),
+            tts_language=ext_mapping_get(voice, "tts_language", (str,), "en"),
+            realtime_model=ext_mapping_get(realtime, "model", (str,), "grok-voice-latest"),
             realtime_voice=realtime_voice,
             realtime_sample_rate=sample_rate,
-            image_model=mapping_get(image, "model", (str,), "grok-imagine-image"),
-            image_aspect_ratio=mapping_get(image, "aspect_ratio", (str,), ""),
-            image_resolution=mapping_get(image, "resolution", (str,), ""),
+            image_model=ext_mapping_get(image, "model", (str,), "grok-imagine-image"),
+            image_aspect_ratio=ext_mapping_get(image, "aspect_ratio", (str,), ""),
+            image_resolution=ext_mapping_get(image, "resolution", (str,), ""),
         )

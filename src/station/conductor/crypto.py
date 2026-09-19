@@ -1,11 +1,11 @@
 import base64
 import json
 import os
-from typing import Any
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from station.errors import ExternalError
 from station.prototypes.boundary import ext_dict, ext_str
 
 PUBLIC_KEY_TOKEN_PREFIX = "lcpk1:"
@@ -17,7 +17,7 @@ def b64url_encode(raw: bytes) -> str:
 def b64url_decode(s: str) -> bytes:
     s = (s or "").strip()
     if not s:
-        raise ValueError("empty base64url")
+        raise ExternalError("empty base64url")
     pad = "=" * ((4 - (len(s) % 4)) % 4)
     return base64.urlsafe_b64decode(s + pad)
 
@@ -44,7 +44,7 @@ def load_private_key(path: str) -> rsa.RSAPrivateKey:
         raw = f.read()
     key = serialization.load_pem_private_key(raw, password=None)
     if not isinstance(key, rsa.RSAPrivateKey):
-        raise ValueError("unsupported key type")
+        raise ExternalError("unsupported key type")
     return key
 
 def write_private_key(path: str, key: rsa.RSAPrivateKey) -> None:
@@ -62,11 +62,11 @@ def decrypt_if_encrypted(priv: rsa.RSAPrivateKey | None, token: str) -> tuple[st
     if not token.startswith(ENCRYPTED_TOKEN_PREFIX):
         return token, False
     if priv is None:
-        raise ValueError("private key not configured")
+        raise ExternalError("private key not configured")
     raw = token[len(ENCRYPTED_TOKEN_PREFIX) :]
     payload = ext_dict("encrypted token payload", json.loads(b64url_decode(raw).decode("utf-8")))
     if payload.get("v") != 1:
-        raise ValueError("invalid encrypted token payload")
+        raise ExternalError("invalid encrypted token payload")
     k = ext_str("encrypted token k", payload.get("k"), default="", strip=False)
     n = ext_str("encrypted token n", payload.get("n"), default="", strip=False)
     c = ext_str("encrypted token c", payload.get("c"), default="", strip=False)
@@ -79,18 +79,3 @@ def decrypt_if_encrypted(priv: rsa.RSAPrivateKey | None, token: str) -> tuple[st
     )
     plain = AESGCM(key).decrypt(nonce, ciphertext, None)
     return plain.decode("utf-8"), True
-
-def decrypt_settings_if_encrypted(raw_settings: Any, private_key_path: str | None = None) -> Any:
-    raw_settings = ext_dict("settings", raw_settings)
-    enc = raw_settings.get("__enc__")
-    if enc is None:
-        return raw_settings
-    enc = ext_str("__enc__", enc, default="")
-    if not enc:
-        return raw_settings
-    if not private_key_path or not private_key_path.strip():
-        raise ValueError("local conductor private key path not set")
-    priv = load_private_key(private_key_path.strip())
-    plain, _ = decrypt_if_encrypted(priv, enc)
-    decoded = json.loads(plain) if plain.strip() else {}
-    return ext_dict("decrypted settings", decoded)

@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 
 from station import logger
+from station.errors import ExternalError
 from station.prototypes.boundary import ext_dict, ext_str
 from station.prototypes.gateway_process import SessionEvent, SessionEventBus, gateway_subprocess_kwargs
 from station.prototypes.jsonrpc_process import JsonLineRpcProcess
@@ -87,9 +88,6 @@ class HermesGatewayProcess(JsonLineRpcProcess):
         self._events.drop_queued(session_id)
         await self.request("prompt.submit", {"session_id": session_id, "text": text})
 
-    async def interrupt_session(self, *, session_id):
-        return ext_dict("session.interrupt result", await self.request("session.interrupt", {"session_id": session_id}))
-
     async def respond(self, *, method, session_id, payload):
         params = {"session_id": session_id}
         params.update(payload)
@@ -139,7 +137,7 @@ class HermesGatewayProcess(JsonLineRpcProcess):
         params = ext_dict("hermes event params", frame.get("params"))
         event_type = ext_str("hermes event type", params.get("type"))
         if not event_type:
-            raise TypeError("hermes event type must be non-empty")
+            raise ExternalError("hermes event type must be non-empty")
         session_id = ext_str("hermes event session_id", params.get("session_id"))
         payload = params.get("payload")
         if payload is None:

@@ -4,7 +4,9 @@ from collections import deque
 from dataclasses import dataclass
 
 from station import logger
-from station.prototypes.boundary import ext_dict, ext_mapping_get, ext_require, ext_str, validate_inbound_data
+from station.api.http import log_caught
+from station.errors import ExternalError
+from station.prototypes.boundary import ext_dict, ext_mapping_get, ext_require, validate_inbound_data
 
 @dataclass(slots=True)
 class InboundMessageContext:
@@ -20,14 +22,6 @@ class InboundMessageContext:
     @property
     def text(self):
         return self.fields["inbound_text"]
-
-    @property
-    def raw_text(self):
-        return self.fields["text"]
-
-    @property
-    def caption(self):
-        return self.fields["caption"]
 
     @property
     def reply_to(self):
@@ -286,9 +280,6 @@ class PrototypeInbound:
         )
 
     async def _handle_inbound_batch(self, batch):
-        await self._handle_message_batch_impl(batch)
-
-    async def _handle_message_batch_impl(self, batch):
         for job in batch:
             await self._run_inbound_job(job)
 
@@ -312,14 +303,15 @@ class PrototypeInbound:
                     await self._complete_inbound_job(job_id)
             except asyncio.CancelledError:
                 raise
+            except ExternalError as e:
+                log_caught(logger, e, where="inbound_worker model_id=%s batch=%s" % (self.model_id, len(batch)))
+                for job in batch:
+                    job_id = job.get("job_id")
+                    if job_id == "":
+                        job_id = None
+                    await self._complete_inbound_job(job_id)
             except Exception as e:
-                logger.error(
-                    "unexpected where=inbound_worker model_id=%s batch=%s error=%s",
-                    self.model_id,
-                    len(batch),
-                    e,
-                    exc_info=e,
-                )
+                log_caught(logger, e, where="inbound_worker model_id=%s batch=%s" % (self.model_id, len(batch)))
                 if self._at_least_once:
                     for job in batch:
                         await self._requeue_inbound_job(job)
@@ -412,10 +404,6 @@ class PrototypeInbound:
         )
         await self._recover_inbound_pending()
         return None
-
-    async def restart(self):
-        await self.stop()
-        await self.start()
 
     async def stop(self):
         async with self._start_lock:

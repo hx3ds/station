@@ -8,7 +8,8 @@ from station.conductor.platforms import guidance
 from station.conductor.platforms.base import LocalPlatformAdapter
 from station.conductor.util import node_bin, whatsapp_bridge_dir, ext_int, ext_str, ext_id
 from station import logger
-from station.prototypes.boundary import ext_dict, ext_float, ext_list, ext_require
+from station.errors import ExternalError
+from station.prototypes.boundary import ext_dict, ext_list
 
 class WhatsAppIO:
     def __init__(self, conductor):
@@ -248,7 +249,7 @@ class WhatsAppAdapter(LocalPlatformAdapter):
                     text = ext_str(msg.get("text"), "text")
                     user_id = ext_id(msg.get("user_id"), "user_id").strip()
                     if not user_id:
-                        raise TypeError("whatsapp message user_id must be non-empty")
+                        raise ExternalError("whatsapp message user_id must be non-empty")
                     message_id = ext_id(msg.get("message_id"), "message_id").strip()
                     media_id = ext_id(msg.get("media_id"), "media_id").strip()
                     if not chat_id or (not text and not media_id):

@@ -4,29 +4,10 @@ import copy
 from dataclasses import replace
 from typing import Any
 
+from station.api.http import log_caught
 from station.config.config import Config
+from station.errors import ExternalError
 from station import logger
-
-SIGHUP_FIELD_PATHS = (
-    "admin_token",
-    "telegram_api_url",
-    "telegram_webhook_mode",
-    "telegram_webhook_secret",
-    "discord_api_url",
-    "whatsapp_cloud_api_url",
-    "qq_api_url",
-    "qq_token_url",
-    "consul_url",
-    "server.isolate_after",
-    "server.outbound_retry_attempts",
-    "server.outbound_retry_base_seconds",
-    "server.outbound_circuit_failures",
-    "server.outbound_circuit_cooldown_seconds",
-    "recorder.level",
-    "recorder.smoothing_window",
-    "prototype.ava",
-    "prototype.reply_to",
-)
 
 def _mark(out: list[str], path: str, changed: bool) -> None:
     if changed:
@@ -185,7 +166,7 @@ def _restore_postmaster(dst: Config, src: Config) -> None:
 def reload_from_disk(current_config: Config) -> dict[str, Any]:
     config_path = current_config.config_file_path
     if not config_path or not config_path.strip():
-        raise ValueError("missing config_file_path")
+        raise ExternalError("missing config_file_path")
     secret_path = current_config.secret_file_path
 
     loaded = Config(
@@ -230,12 +211,12 @@ def apply_reloaded_config(app, result: dict[str, Any]) -> None:
         try:
             recorder.set_log_level(new_config.recorder.level)
         except Exception as e:
-            logger.error("unexpected where=reload recorder.level error=%s", e, exc_info=e)
+            log_caught(logger, e, where="reload recorder.level")
     if "recorder.smoothing_window" in applied:
         try:
             recorder.smoothing_window = new_config.recorder.smoothing_window
         except Exception as e:
-            logger.error("unexpected where=reload recorder.smoothing_window error=%s", e, exc_info=e)
+            log_caught(logger, e, where="reload recorder.smoothing_window")
 
     recorder.config.level = new_config.recorder.level
     recorder.config.smoothing_window = new_config.recorder.smoothing_window

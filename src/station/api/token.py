@@ -4,13 +4,15 @@ import re
 from pathlib import Path
 from aiohttp import web
 
+from station.api.http import read_json_object
 from station.client.consul import fetch_prototype
 from station.client.context import ClientContext, update_client_context_prototype
 from station.config.config import PrototypeConfig
 from station.conductor.handlers import ensure_local_conductor
 from station.prototypes.registry import resolve_prototype_class
 from station.tenants import Tenant, TokenState
-from station.prototypes.boundary import ext_bool, ext_dict, ext_int, ext_str
+from station.errors import ExternalError
+from station.prototypes.boundary import ext_bool, ext_int, ext_str
 
 def _is_localhost_request(request) -> bool:
     transport = request.transport
@@ -132,33 +134,16 @@ async def handle_admin_update_prototype_token(request):
         return denied
 
     app = request.app
-    try:
-        body = await request.json()
-    except (json.JSONDecodeError, ValueError):
-        return web.json_response({"result": 1, "msg": "Invalid JSON body", "data": None}, status=400)
-    try:
-        body = ext_dict("body", body)
-        new_token = ext_str("token", body.get("token"), default="")
-        if not new_token:
-            raise TypeError("Missing token")
-        grace_seconds = body.get("grace_seconds", 300)
-        grace_seconds = ext_int("grace_seconds", grace_seconds)
-        if grace_seconds < 0:
-            raise TypeError("Invalid grace_seconds")
-        prototype_id = body.get("prototype_id")
-        if prototype_id is not None:
-            prototype_id = ext_int("prototype_id", prototype_id)
-    except TypeError as e:
-        msg = str(e)
-        if "token" in msg.lower() and "must be str" in msg:
-            msg = "Missing token"
-        elif "grace_seconds" in msg:
-            msg = "Invalid grace_seconds"
-        elif "prototype_id" in msg:
-            msg = "Invalid prototype_id"
-        elif "body" in msg or "dict" in msg:
-            msg = "Invalid JSON body"
-        return web.json_response({"result": 1, "msg": msg, "data": None}, status=400)
+    body = await read_json_object(request)
+    new_token = ext_str("token", body.get("token"), default="")
+    if not new_token:
+        raise ExternalError("Missing token")
+    grace_seconds = ext_int("grace_seconds", body.get("grace_seconds", 300))
+    if grace_seconds < 0:
+        raise ExternalError("Invalid grace_seconds")
+    prototype_id = body.get("prototype_id")
+    if prototype_id is not None:
+        prototype_id = ext_int("prototype_id", prototype_id)
 
     registry = app["tenants"]
     config = app["config"]
@@ -173,7 +158,7 @@ async def handle_admin_update_prototype_token(request):
             break
     config_file_path = config.config_file_path
     if not config_file_path:
-        raise ValueError("Config file path not available")
+        raise ExternalError("Config file path not available")
     _persist_prototypes_array_token(config_file_path, tenant.id, new_token)
     return web.json_response(
         {"result": 0, "msg": "ok", "data": {"grace_seconds": grace_seconds, "prototype_id": tenant.id}},
@@ -189,57 +174,29 @@ async def handle_admin_add_prototype(request):
     registry = app["tenants"]
     config = app["config"]
 
-    try:
-        body = await request.json()
-    except (json.JSONDecodeError, ValueError):
-        return web.json_response({"result": 1, "msg": "Invalid JSON body", "data": None}, status=400)
-    try:
-        body = ext_dict("body", body)
-        prototype_id = ext_int("prototype_id", body.get("prototype_id"))
-        token = ext_str("token", body.get("token"), default="")
-        if not token:
-            raise TypeError("Missing token")
-        kind = body.get("kind", "station")
-        if kind is None:
-            kind = "station"
-        kind = ext_str("kind", kind, default="").strip()
-        if not kind:
-            raise TypeError("Invalid kind")
-        name = body.get("name")
-        if name is not None:
-            name = ext_str("name", name, default="").strip() or None
-        config_file = body.get("config_file")
-        if config_file is not None:
-            config_file = ext_str("config_file", config_file, default="").strip() or None
-        secret_file = body.get("secret_file")
-        if secret_file is not None:
-            secret_file = ext_str("secret_file", secret_file, default="").strip() or None
-        persist = ext_bool("persist", body.get("persist", False))
-        ava = ext_bool("ava", body.get("ava", False))
-        reply_to = ext_bool("reply_to", body.get("reply_to", False))
-    except TypeError as e:
-        msg = str(e)
-        if "prototype_id" in msg:
-            msg = "Missing prototype_id"
-        elif msg == "Missing token" or ("token" in msg and "str" in msg):
-            msg = "Missing token"
-        elif "kind" in msg:
-            msg = "Invalid kind"
-        elif "name" in msg:
-            msg = "Invalid name"
-        elif "config_file" in msg:
-            msg = "Invalid config_file"
-        elif "secret_file" in msg:
-            msg = "Invalid secret_file"
-        elif "persist" in msg:
-            msg = "Invalid persist"
-        elif "ava" in msg:
-            msg = "Invalid ava"
-        elif "reply_to" in msg:
-            msg = "Invalid reply_to"
-        else:
-            msg = "Invalid JSON body"
-        return web.json_response({"result": 1, "msg": msg, "data": None}, status=400)
+    body = await read_json_object(request)
+    prototype_id = ext_int("prototype_id", body.get("prototype_id"))
+    token = ext_str("token", body.get("token"), default="")
+    if not token:
+        raise ExternalError("Missing token")
+    kind = body.get("kind", "station")
+    if kind is None:
+        kind = "station"
+    kind = ext_str("kind", kind, default="").strip()
+    if not kind:
+        raise ExternalError("Invalid kind")
+    name = body.get("name")
+    if name is not None:
+        name = ext_str("name", name, default="").strip() or None
+    config_file = body.get("config_file")
+    if config_file is not None:
+        config_file = ext_str("config_file", config_file, default="").strip() or None
+    secret_file = body.get("secret_file")
+    if secret_file is not None:
+        secret_file = ext_str("secret_file", secret_file, default="").strip() or None
+    persist = ext_bool("persist", body.get("persist", False))
+    ava = ext_bool("ava", body.get("ava", False))
+    reply_to = ext_bool("reply_to", body.get("reply_to", False))
 
     if registry.hosts(prototype_id):
         return web.json_response({"result": 1, "msg": "prototype_id already attached", "data": None}, status=409)
@@ -253,20 +210,11 @@ async def handle_admin_add_prototype(request):
     if fetched:
         fetched_id = fetched.get("prototype_id")
         if fetched_id is not None:
-            try:
-                prototype_id = ext_int("prototype_id", fetched_id)
-            except TypeError:
-                return web.json_response({"result": 1, "msg": "Invalid prototype_id from consul", "data": None}, status=400)
-        try:
-            is_local = ext_bool("is_local", fetched.get("is_local", False))
-        except TypeError:
-            return web.json_response({"result": 1, "msg": "Invalid is_local from consul", "data": None}, status=400)
+            prototype_id = ext_int("prototype_id", fetched_id)
+        is_local = ext_bool("is_local", fetched.get("is_local", False))
         await app["db"].put_prototype(fetched)
 
-    try:
-        resolve_prototype_class(kind)
-    except ValueError as e:
-        return web.json_response({"result": 1, "msg": str(e), "data": None}, status=400)
+    resolve_prototype_class(kind)
 
     token_state = TokenState(token)
     client_context = ClientContext(
@@ -283,7 +231,6 @@ async def handle_admin_add_prototype(request):
     if fetched:
         update_client_context_prototype(client_context, fetched)
 
-    try:
         registry.add(
             Tenant(
                 id=prototype_id,
@@ -298,15 +245,12 @@ async def handle_admin_add_prototype(request):
             ),
             primary=False,
         )
-    except ValueError as e:
-        return web.json_response({"result": 1, "msg": str(e), "data": None}, status=409)
 
     config.hosted_prototypes.append(
         PrototypeConfig(
             id=prototype_id,
             token=token,
             kind=kind,
-            name=name,
             config_file=config_file,
             secret_file=secret_file,
             ava=ava,
@@ -320,7 +264,7 @@ async def handle_admin_add_prototype(request):
     if persist:
         config_file_path = config.config_file_path
         if not config_file_path:
-            raise RuntimeError("Config file path not available")
+            raise ExternalError("Config file path not available")
         _append_prototypes_table(
             config_file_path,
             prototype_id=prototype_id,

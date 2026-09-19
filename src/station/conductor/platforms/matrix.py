@@ -11,7 +11,7 @@ from station.conductor.crypto import decrypt_if_encrypted
 from station.conductor.platforms import guidance
 from station.conductor.util import attachment_type_from_meta, normalize_http_url, ext_str, ext_id
 from station import logger
-from station.prototypes.boundary import ext_dict, ext_float, ext_list, ext_require
+from station.prototypes.boundary import ext_dict, ext_list
 
 _MATRIX_CLIENT_API_PREFIX = "/_matrix/client/v3"
 _MATRIX_MEDIA_API_PREFIX = "/_matrix/media/v3"

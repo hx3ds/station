@@ -2,6 +2,7 @@ import json
 import sqlite3
 import time
 
+from station.errors import ExternalError, InternalError
 from station.conductor.platform_types import strip_qr_prefix, validate_local_platform_type
 from station.database.request_dedupe import run_in_db_executor
 from station.prototypes.boundary import ext_dict, ext_str
@@ -64,14 +65,14 @@ class LocalConductorDatabaseMixin:
         state_key: str | None = None,
     ) -> tuple[str, str | None, str | None]:
         if not acct_id:
-            raise ValueError("acct_id is required")
+            raise ExternalError("acct_id is required")
         normalized_type = None
         if acct_type is not None:
             normalized_type = validate_local_platform_type(acct_type, field_name="acct_type")
         normalized_key = None
         if state_key is not None:
             if not state_key:
-                raise ValueError("state_key is required")
+                raise ExternalError("state_key is required")
             normalized_key = validate_local_platform_type(state_key, field_name="state_key")
         return acct_id, normalized_type, normalized_key
 
@@ -118,7 +119,7 @@ class LocalConductorDatabaseMixin:
         is_local: bool = True,
     ) -> None:
         if not acct_id:
-            raise ValueError("acct_id is required")
+            raise ExternalError("acct_id is required")
         acct_type = validate_local_platform_type(acct_type, field_name="acct_type")
 
         def _sync():
@@ -210,7 +211,7 @@ class LocalConductorDatabaseMixin:
 
     async def replace_model_chats(self, *, model_id: str, prototype_id: int | None, chats: list[dict]) -> None:
         if not model_id:
-            raise ValueError("model_id is required")
+            raise InternalError("model_id is required")
         prepared = []
         for c in chats:
             acct_id = c.get("acct_id") or ""
