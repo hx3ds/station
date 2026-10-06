@@ -8,9 +8,10 @@ import aiohttp
 
 from station.conductor.crypto import decrypt_if_encrypted
 from station.conductor.platforms import guidance
+from station.conductor.platforms.group_settings import telegram_group_notice
 from station.conductor.platforms.keyboard import parse_keyboard, telegram_reply_markup
 from station.conductor.platforms.telegram_network import TelegramFallbackResolver, discover_fallback_ips, parse_fallback_ip_env
-from station.conductor.util import inbound_request_id, ext_str, ext_id, ext_bool, ext_int
+from station.conductor.util import apply_sender, inbound_request_id, ext_str, ext_id, ext_bool, ext_int
 from station import logger
 from station.errors import ExternalError
 from station.prototypes.boundary import ext_dict, ext_float, ext_list
@@ -210,6 +211,15 @@ class TelegramUpdate:
     reply_to_text: str = ""
     chat_type: str = ""
     callback_query_id: str = ""
+    sender_name: str = ""
+    sender_username: str = ""
+
+
+def _telegram_person_sender(sender):
+    first = ext_str(sender.get("first_name"), "first_name").strip()
+    last = ext_str(sender.get("last_name"), "last_name").strip()
+    username = ext_str(sender.get("username"), "username").strip()
+    return f"{first} {last}".strip(), username
 
 class TelegramIO:
     def __init__(self, conductor):
@@ -311,8 +321,11 @@ class TelegramIO:
         chat_type = ext_str(chat.get("type"), "type").strip()
         sender = msg.get("from")
         carrier_user_id = None
+        sender_name = ""
+        sender_username = ""
         if sender is not None:
             sender = ext_dict('telegram message from', sender)
+            sender_name, sender_username = _telegram_person_sender(sender)
             if sender.get("id") is not None:
                 carrier_user_id = ext_id(sender.get("id"), "sender.id", allow_none=False)
         text = ext_str(msg.get("text"), "text").strip()
@@ -421,7 +434,7 @@ class TelegramIO:
 
         reply_snippet = reply_quote_snippet(msg)
         reply_to_text = reply_snippet
-        text = guidance.inject_telegram_reply_context(text, reply_to_text)
+        text = guidance.inject_reply_context(text, reply_to_text)
 
         return TelegramUpdate(
             update_id=update_id,
@@ -435,6 +448,8 @@ class TelegramIO:
             reply_to=reply_to,
             reply_to_text=reply_to_text,
             chat_type=chat_type,
+            sender_name=sender_name,
+            sender_username=sender_username,
         )
 
     def _location_text(self, msg: dict) -> str:
@@ -494,19 +509,26 @@ class TelegramIO:
         if message_id is None:
             return None
         carrier_user_id = None
+        sender_name = ""
+        sender_username = ""
         user = rxn.get("user")
         if user is not None:
             user = ext_dict('telegram reaction user', user)
+            sender_name, sender_username = _telegram_person_sender(user)
             if user.get("id") is not None:
                 carrier_user_id = ext_id(user.get("id"), "user.id", allow_none=False)
         if carrier_user_id is None:
             actor_chat = rxn.get("actor_chat")
             if actor_chat is not None:
                 actor_chat = ext_dict('telegram reaction actor_chat', actor_chat)
+                title = ext_str(actor_chat.get("title"), "title").strip()
+                sender_name, sender_username = _telegram_person_sender(actor_chat)
+                if title:
+                    sender_name = title
                 if actor_chat.get("id") is not None:
                     carrier_user_id = ext_id(actor_chat.get("id"), "actor_chat.id", allow_none=False)
         emojis, custom_ids = reaction_type_parts(rxn.get("new_reaction"))
-        text = guidance.format_telegram_reaction_text(emojis, custom_ids)
+        text = guidance.format_reaction_text(emojis, custom_ids)
         chat_id_str = platform_chat_id_for_message(ext_id(chat_id, "chat.id", allow_none=False), effective_message_thread_id(rxn))
         return TelegramUpdate(
             update_id=update_id,
@@ -518,6 +540,8 @@ class TelegramIO:
             attachments=[],
             reply_to=ext_id(message_id, "message_id"),
             chat_type=ext_str(chat.get("type"), "type").strip(),
+            sender_name=sender_name,
+            sender_username=sender_username,
         )
 
     def _parse_callback_query(self, update_id: int, cq: dict) -> TelegramUpdate | None:
@@ -527,8 +551,11 @@ class TelegramIO:
         query_id = ext_id(cq.get("id"), "id").strip()
         sender = cq.get("from")
         carrier_user_id = None
+        sender_name = ""
+        sender_username = ""
         if sender is not None:
             sender = ext_dict("telegram callback from", sender)
+            sender_name, sender_username = _telegram_person_sender(sender)
             if sender.get("id") is not None:
                 carrier_user_id = ext_id(sender.get("id"), "sender.id", allow_none=False)
         msg = cq.get("message")
@@ -560,6 +587,8 @@ class TelegramIO:
             reply_to=reply_to,
             chat_type=ext_str(chat.get("type"), "type").strip(),
             callback_query_id=query_id,
+            sender_name=sender_name,
+            sender_username=sender_username,
         )
 
     async def _get_updates(self, *, token: str, offset: int) -> list[dict] | None:
@@ -682,6 +711,29 @@ class TelegramIO:
             if len(data) > limit:
                 return None
             return data
+
+    async def group_message_notice(self, *, token: str) -> str:
+        token = (token or "").strip()
+        if not token:
+            raise ExternalError("telegram token required")
+        await self._ensure_network_ready()
+        url = f"{self._api_base()}/bot{token}/getMe"
+        try:
+            async with self.session.get(url) as resp:
+                body = await resp.json(content_type=None)
+                status = int(resp.status)
+        except aiohttp.ClientError as e:
+            raise ExternalError("telegram getMe failed: %s" % e) from e
+        body = ext_dict("telegram getMe body", body)
+        if status != 200 or not body.get("ok"):
+            desc = ""
+            if body.get("description") is not None:
+                desc = ext_str(body.get("description"), "description")
+            raise ExternalError(desc or "telegram getMe failed")
+        result = body.get("result")
+        result = ext_dict("telegram getMe result", result)
+        can_read = ext_bool(result.get("can_read_all_group_messages"), "can_read_all_group_messages")
+        return telegram_group_notice(can_read)
 
     def _rate_limit_delay(self, status, body: dict) -> int:
         code = 0
@@ -823,20 +875,22 @@ class TelegramIO:
             if markup is None:
                 return False
             chunks = [" "]
+        use_parse_mode = guidance.uses_telegram_parse_mode(text or "")
         last_ok = False
         for idx, chunk in enumerate(chunks):
             payload: dict[str, Any] = {
                 "chat_id": api_chat_id,
                 "text": chunk,
-                "parse_mode": "MarkdownV2",
             }
+            if use_parse_mode:
+                payload["parse_mode"] = "MarkdownV2"
             payload.update(_thread_payload(thread_id=thread_from_chat))
             if idx == 0:
                 payload.update(self._reply_to_payload(reply_to))
                 if markup is not None:
                     payload["reply_markup"] = markup
             ok, desc = await self._send(token=token, method="send_message", payload=payload)
-            if not ok and self._is_parse_mode_error(desc):
+            if not ok and use_parse_mode and self._is_parse_mode_error(desc):
                 plain_payload = {
                     "chat_id": api_chat_id,
                     "text": guidance.strip_markdown_v2(chunk),
@@ -881,6 +935,15 @@ class TelegramIO:
         filename: str | None = None,
     ) -> bool:
         method = guidance.resolve_telegram_media_method(method, filename or "")
+        if method == "send_voice" and file_bytes is not None:
+            from station.prototypes.voice_policy import is_ogg_opus_audio, transcode_audio_to_ogg_opus
+
+            if not is_ogg_opus_audio(file_bytes):
+                converted = transcode_audio_to_ogg_opus(file_bytes)
+                if converted:
+                    file_bytes = converted
+                    stem = (filename or "voice").rsplit(".", 1)[0] or "voice"
+                    filename = stem + ".ogg"
         field = _METHOD_MEDIA_FIELD.get(method)
         if not field:
             return False
@@ -903,7 +966,8 @@ class TelegramIO:
             prepared_caption = guidance.prepare_outbound_caption("telegram", caption)
             if prepared_caption:
                 payload["caption"] = prepared_caption
-                payload["parse_mode"] = "MarkdownV2"
+                if guidance.uses_telegram_parse_mode(caption):
+                    payload["parse_mode"] = "MarkdownV2"
         payload.update(self._reply_to_payload(reply_to))
         if file_bytes is None:
             ref = (media_ref or "").strip()
@@ -994,7 +1058,10 @@ class TelegramIO:
             "caption": parsed.caption,
             "attachments": parsed.attachments,
             "msg_id": parsed.msg_id,
+            "platform": "telegram",
+            "user_id": parsed.carrier_user_id or "",
         }
+        apply_sender(body, name=parsed.sender_name, username=parsed.sender_username)
         if parsed.reply_to:
             body["reply_to"] = parsed.reply_to
         if parsed.reply_to_text:

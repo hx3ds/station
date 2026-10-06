@@ -12,7 +12,7 @@ from station import logger
 from station.errors import ExternalError
 from station.prototypes.boundary import ext_bool, ext_dict, ext_list, ext_str
 from station.prototypes.gateway_process import SessionEvent, SessionEventBus, close_subprocess, gateway_subprocess_kwargs
-from station.prototypes.launch_settings import apply_local_provider_env
+from station.prototypes.launch_settings import apply_local_provider_env, child_process_env
 
 LISTENING_RE = re.compile(r"opencode server listening on (https?://\S+)", re.IGNORECASE)
 PORT_RANGE_START = 19200
@@ -66,8 +66,7 @@ class OpenCodeServerProcess:
         workspace = os.path.expanduser(self.settings.workspace_dir)
         os.makedirs(workspace, exist_ok=True)
 
-        env = os.environ.copy()
-        env.update(self.settings.extra_env)
+        env = child_process_env(self.settings.extra_env)
         if self.settings.uses_local_llm():
             env = apply_local_provider_env(env, base_url=self.settings.local_llm_base_url)
         if self.settings.server_password:
@@ -142,6 +141,11 @@ class OpenCodeServerProcess:
     def bind_session(self, *, session_id, acct_id, chat_id):
         self._chat_by_session[session_id] = (acct_id, chat_id)
 
+    def unbind_session(self, session_id):
+        session_id = ext_str("OpenCode session id", session_id)
+        if session_id:
+            self._chat_by_session.pop(session_id, None)
+
     def session_queue(self, session_id):
         return self._events.queue(session_id)
 
@@ -166,6 +170,78 @@ class OpenCodeServerProcess:
         logger.info("OpenCode session created session_id=%s", session_id)
         return session_id
 
+    async def session_get(self, session_id):
+        session_id = ext_str("OpenCode session id", session_id)
+        if not session_id:
+            return None
+        result = await self._request_json(
+            "GET",
+            "/session/%s" % quote(session_id, safe=""),
+            allow_statuses=(404,),
+        )
+        if result is None:
+            return None
+        return ext_dict("OpenCode session", result)
+
+    async def session_messages(self, session_id):
+        session_id = ext_str("OpenCode session id", session_id)
+        if not session_id:
+            return None
+        result = await self._request_json(
+            "GET",
+            "/session/%s/message" % quote(session_id, safe=""),
+            allow_statuses=(404,),
+        )
+        if result is None:
+            return None
+        if type(result) is dict:
+            messages = result.get("messages")
+            if messages is None:
+                messages = result.get("data")
+            if messages is None:
+                return None
+            return ext_list("OpenCode session messages", messages)
+        return ext_list("OpenCode session messages", result)
+
+    async def session_summarize(self, session_id):
+        session_id = ext_str("OpenCode session id", session_id)
+        if not session_id:
+            return False
+        if self._session is None or not self.base_url:
+            raise RuntimeError("OpenCode server is not running")
+        path = "/session/%s/summarize" % quote(session_id, safe="")
+        async with self._session.request("POST", "%s%s" % (self.base_url, path), json={}) as resp:
+            if resp.status in {404, 405}:
+                return False
+            text = await resp.text()
+            if resp.status >= 400:
+                logger.info(
+                    "OpenCode summarize failed session_id=%s status=%s error=%s",
+                    session_id,
+                    resp.status,
+                    text[:300],
+                )
+                return False
+            return True
+
+    async def maybe_compact_session(self, session_id):
+        try:
+            messages = await self.session_messages(session_id)
+            if messages is None:
+                return
+            if len(messages) <= 40:
+                return
+            summarized = await self.session_summarize(session_id)
+            if summarized:
+                logger.info("OpenCode session summarized session_id=%s messages=%s", session_id, len(messages))
+        except Exception as e:
+            logger.error(
+                "unexpected where=opencode compact session_id=%s error=%s",
+                session_id,
+                e,
+                exc_info=e,
+            )
+
     async def prompt_async(self, *, session_id, parts):
         await self._request_json(
             "POST",
@@ -173,6 +249,20 @@ class OpenCodeServerProcess:
             json_body=self._prompt_body(parts),
             expect_json=False,
         )
+
+    async def session_abort(self, session_id):
+        session_id = ext_str("OpenCode session id", session_id)
+        if not session_id or self._session is None or not self.base_url:
+            return
+        try:
+            await self._request_json(
+                "POST",
+                "/session/%s/abort" % quote(session_id, safe=""),
+                json_body={},
+                expect_json=False,
+            )
+        except (aiohttp.ClientError, OSError, RuntimeError, asyncio.TimeoutError) as e:
+            logger.error("OpenCode session abort failed session_id=%s error=%s", session_id, e)
 
     async def prompt(self, *, session_id, parts):
         return await self._request_dict(
@@ -322,12 +412,14 @@ class OpenCodeServerProcess:
             await asyncio.sleep(0.1)
         raise RuntimeError("OpenCode server did not become healthy: %s" % last_error)
 
-    async def _request_json(self, method, path, *, json_body=None, expect_json=True):
+    async def _request_json(self, method, path, *, json_body=None, expect_json=True, allow_statuses=()):
         if self._session is None or not self.base_url:
             raise RuntimeError("OpenCode server is not running")
         async with self._session.request(method, "%s%s" % (self.base_url, path), json=json_body) as resp:
             text = await resp.text()
             if resp.status >= 400:
+                if resp.status in allow_statuses:
+                    return None
                 raise RuntimeError("OpenCode %s %s failed (%d): %s" % (method, path, resp.status, text[:500]))
             if not expect_json or not text.strip():
                 return None

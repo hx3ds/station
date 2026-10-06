@@ -8,7 +8,6 @@ from station.conductor.platforms import guidance
 from station.conductor.platforms.base import LocalPlatformAdapter
 from station.conductor.util import node_bin, whatsapp_bridge_dir, ext_int, ext_str, ext_id
 from station import logger
-from station.errors import ExternalError
 from station.prototypes.boundary import ext_dict, ext_list
 
 class WhatsAppIO:
@@ -248,8 +247,6 @@ class WhatsAppAdapter(LocalPlatformAdapter):
                     chat_id = ext_id(msg.get("chat_id"), "chat_id").strip()
                     text = ext_str(msg.get("text"), "text")
                     user_id = ext_id(msg.get("user_id"), "user_id").strip()
-                    if not user_id:
-                        raise ExternalError("whatsapp message user_id must be non-empty")
                     message_id = ext_id(msg.get("message_id"), "message_id").strip()
                     media_id = ext_id(msg.get("media_id"), "media_id").strip()
                     if not chat_id or (not text and not media_id):
@@ -272,11 +269,15 @@ class WhatsAppAdapter(LocalPlatformAdapter):
                                 "content_type": ext_str(msg.get("mime"), "mime"),
                             }
                         )
+                    native_chat = ext_str(msg.get("chat_type"), "chat_type").strip().lower()
+                    if not native_chat:
+                        native_chat = "group" if chat_id.endswith("@g.us") else "private"
                     body = {
                         "text": text,
                         "caption": ext_str(msg.get("caption"), "caption"),
                         "user_id": user_id,
                         "platform": "whatsapp",
+                        "chat_type": native_chat,
                         "chat_id": chat_id,
                         "attachments": attachments,
                         "msg_id": message_id,

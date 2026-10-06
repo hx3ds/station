@@ -1,16 +1,18 @@
-from aiohttp import web
 from station.client.conductor import send_proxy, send_outbound
 from station.errors import ExternalError, InternalError
+from station.prototypes.chat_history import clear_chat_history
 from station.prototypes.attachments import (
     PrototypeAttachments,
     find_attachment,
     normalize_attachments,
 )
+from station.prototypes.outbound_files import PrototypeOutboundFiles
 from station.prototypes.boundary import (
     ext_str,
     validate_inbound_data,
     validate_inbound_message_fields,
 )
+from .commands import PrototypeCommands
 from .echo import PrototypeEcho
 from .pfs import PrototypeFS
 from .webrtc import PrototypeWebRTC
@@ -18,7 +20,7 @@ from .discord_voice import PrototypeDiscordVoice
 from .inbound import InboundMessageContext, PrototypeInbound
 from station import logger
 
-class Prototype(PrototypeEcho, PrototypeWebRTC, PrototypeDiscordVoice, PrototypeAttachments, PrototypeFS, PrototypeInbound):
+class Prototype(PrototypeCommands, PrototypeEcho, PrototypeWebRTC, PrototypeDiscordVoice, PrototypeAttachments, PrototypeOutboundFiles, PrototypeFS, PrototypeInbound):
     def __init__(
         self,
         app,
@@ -50,7 +52,19 @@ class Prototype(PrototypeEcho, PrototypeWebRTC, PrototypeDiscordVoice, Prototype
             self.client_context = tenant.client_context
         self._fs = None
         self._settings = None
+        self._awaiting_secret = set()
         self._inbound_bind()
+
+    def _workspace_root(self):
+        return self.storage_dir
+
+    async def _restart_gateway(self):
+        return
+
+    def _launch_settings(self):
+        if self._settings is not None:
+            return self._settings
+        return self._build_settings()
 
     @property
     def model_settings(self):
@@ -82,7 +96,7 @@ class Prototype(PrototypeEcho, PrototypeWebRTC, PrototypeDiscordVoice, Prototype
             return ctx.token
         return self.prototype_config.token
 
-    async def send_proxy(self, method="send_message", params=None, files=None, request_id=None, chat_id=None, acct_id=None, **kwargs):
+    async def send_proxy(self, method="send_message", params=None, files=None, chat_id=None, acct_id=None, **kwargs):
         return await send_proxy(
             self.client_context,
             model_id=self.model_id,
@@ -90,10 +104,9 @@ class Prototype(PrototypeEcho, PrototypeWebRTC, PrototypeDiscordVoice, Prototype
             method=method,
             params=params,
             files=files,
-            request_id=request_id,
             chat_id=chat_id,
             acct_id=acct_id,
-            **kwargs
+            **kwargs,
         )
 
     async def send_outbound(
@@ -104,7 +117,6 @@ class Prototype(PrototypeEcho, PrototypeWebRTC, PrototypeDiscordVoice, Prototype
         reply_to=None,
         chat_id=None,
         acct_id=None,
-        request_id=None,
         platform="",
         chat_type="",
         keyboard=None,
@@ -116,7 +128,6 @@ class Prototype(PrototypeEcho, PrototypeWebRTC, PrototypeDiscordVoice, Prototype
             reply_to=reply_to,
             chat_id=chat_id,
             acct_id=acct_id,
-            request_id=request_id,
             platform=platform,
             chat_type=chat_type,
             keyboard=keyboard,
@@ -221,6 +232,28 @@ class Prototype(PrototypeEcho, PrototypeWebRTC, PrototypeDiscordVoice, Prototype
     async def _handle_kind_command(self, *, cmd, args, chat_id, acct_id, reply_to, model_settings, platform="", chat_type=""):
         return False
 
+    async def _restart_chat(self, *, chat_id, acct_id):
+        if not acct_id or not chat_id:
+            return
+        clear_chat_history(self.storage_dir, acct_id, chat_id)
+
+    async def _handle_model_config_command(self, *, cmd, args, chat_id, acct_id, reply_to, model_settings, platform="", chat_type=""):
+        return False
+
+    async def _consume_or_request_secret(self, ctx):
+        return False
+
+    async def _handle_inbound_setup(self, ctx):
+        if await self._dispatch_kind_command(
+            ctx.data,
+            ctx.model_settings,
+            chat_id=ctx.chat_id,
+            acct_id=ctx.acct_id,
+            text=ctx.text,
+        ):
+            return True
+        return await self._consume_or_request_secret(ctx)
+
     async def _dispatch_kind_command(self, data, model_settings, *, chat_id=None, acct_id=None, text=None):
         fields = validate_inbound_message_fields(data)
         source = fields["text"] if text is None else text
@@ -233,7 +266,29 @@ class Prototype(PrototypeEcho, PrototypeWebRTC, PrototypeDiscordVoice, Prototype
             reply_to = fields["reply_to"]
         elif reply_to.startswith("callback:"):
             reply_to = ""
-        return await self._handle_kind_command(
+        if await self._handle_model_config_command(
+            cmd=cmd,
+            args=args,
+            chat_id=chat_id,
+            acct_id=acct_id,
+            reply_to=reply_to,
+            model_settings=model_settings,
+            platform=fields["platform"],
+            chat_type=fields["chat_type"],
+        ):
+            return True
+        if await self._handle_kind_command(
+            cmd=cmd,
+            args=args,
+            chat_id=chat_id,
+            acct_id=acct_id,
+            reply_to=reply_to,
+            model_settings=model_settings,
+            platform=fields["platform"],
+            chat_type=fields["chat_type"],
+        ):
+            return True
+        return await self._handle_basic_command(
             cmd=cmd,
             args=args,
             chat_id=chat_id,
@@ -250,30 +305,13 @@ class Prototype(PrototypeEcho, PrototypeWebRTC, PrototypeDiscordVoice, Prototype
         fields = validate_inbound_message_fields(data)
         cmd, _ = self._slash_command(fields["text"])
         if cmd == "/start":
-            proto_type = ""
-            ctx = self.client_context
-            if ctx is not None:
-                proto_type = (ctx.prototype_type or "").strip().lower()
-            if proto_type == "subscription":
-                await self.send_outbound(
-                    text="hi",
-                    chat_id=chat_id,
-                    request_id=request_id,
-                    acct_id=acct_id,
-                    reply_to=fields["msg_id"],
-                    platform=fields["platform"],
-                    chat_type=fields["chat_type"],
-                )
-            return
-        if cmd == "/reset":
             await self.send_outbound(
-                text="reset completed",
+                text="hi",
                 chat_id=chat_id,
-                request_id=request_id,
                 acct_id=acct_id,
+                reply_to=fields["msg_id"],
                 platform=fields["platform"],
-                chat_type=fields["chat_type"],
-            )
+                chat_type=fields["chat_type"])
             return
         return None
 
@@ -289,6 +327,8 @@ class Prototype(PrototypeEcho, PrototypeWebRTC, PrototypeDiscordVoice, Prototype
         if ctx is None:
             return
         if not self._passes_inbound_guards(ctx):
+            return
+        if await self._handle_inbound_setup(ctx):
             return
         await self._handle_inbound_context(ctx)
 
@@ -317,10 +357,8 @@ class Prototype(PrototypeEcho, PrototypeWebRTC, PrototypeDiscordVoice, Prototype
                 text="subscription expired",
                 chat_id=chat_id,
                 acct_id=acct_id,
-                request_id=request_id,
                 platform=fields["platform"],
-                chat_type=fields["chat_type"],
-            )
+                chat_type=fields["chat_type"])
 
     async def handle_event(self, data, model_id, model_settings, chat_id=None, acct_id=None, request_id=None):
         data = validate_inbound_data(data, label="event data")

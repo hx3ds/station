@@ -13,6 +13,19 @@ from station.prototypes.boundary import ext_optional_id
 from station.prototypes.boundary import ext_require
 from station.prototypes.boundary import ext_str as _b_str
 
+def apply_sender(body, *, name="", username=""):
+    sender = {}
+    name = (name or "").strip()
+    username = (username or "").strip()
+    if name:
+        sender["name"] = name
+    if username:
+        sender["username"] = username
+    if sender:
+        body["sender"] = sender
+    return body
+
+
 def inbound_request_id(*parts) -> str:
     raw = ":".join("" if p is None else str(p) for p in parts)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()

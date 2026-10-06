@@ -129,6 +129,8 @@ def validate_inbound_message_fields(data):
     reply_to = ext_optional_id("reply_to", data.get("reply_to"))
     platform = ext_str("platform", data.get("platform"))
     chat_type = ext_str("chat_type", data.get("chat_type"))
+    user_id = ext_str("user_id", data.get("user_id"))
+    sender = _validate_sender(data.get("sender"))
     attachments = ext_list("attachments", data.get("attachments"), allow_none=True, default=[])
     for index, att in enumerate(attachments):
         ext_dict("attachments[%d]" % index, att)
@@ -142,10 +144,32 @@ def validate_inbound_message_fields(data):
         "reply_to": reply_to,
         "platform": platform,
         "chat_type": chat_type,
+        "user_id": user_id,
+        "sender": sender,
         "attachments": attachments,
         "is_expired": False if is_expired is None else is_expired,
         "inbound_text": (text.strip() or caption.strip()),
     }
+
+
+def _validate_sender(value):
+    if value is None:
+        return None
+    raw = ext_dict("sender", value)
+    allowed = {"name", "username"}
+    extra = set(raw) - allowed
+    if extra:
+        raise ExternalError("sender has unexpected keys")
+    sender = {}
+    for key in ("name", "username"):
+        if key not in raw or raw[key] is None:
+            continue
+        text = ext_str("sender.%s" % key, raw[key])
+        if text:
+            sender[key] = text
+    if not sender:
+        return None
+    return sender
 
 
 def validate_attachment(attachment, *, label="attachment"):

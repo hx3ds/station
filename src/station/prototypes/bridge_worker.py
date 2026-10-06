@@ -3,6 +3,7 @@ import contextlib
 from dataclasses import dataclass, field
 
 from station import logger
+from station.prototypes.chat_history import clear_chat_history
 
 @dataclass(slots=True)
 class ChatBridgeState:
@@ -88,8 +89,7 @@ class PrototypeBridgeWorker:
                 chat_id=chat_id,
                 acct_id=acct_id,
                 platform=state.platform,
-                chat_type=state.chat_type,
-            )
+                chat_type=state.chat_type)
         finally:
             async with state.guard:
                 if state.worker_task is current_task:
@@ -135,3 +135,32 @@ class PrototypeBridgeWorker:
         if len(messages) == 1:
             return merge_one(messages[0])
         return merge_many(messages)
+
+    async def _unbind_chat_session(self, *, chat_id, acct_id):
+        state = await self._get_chat_state(acct_id=acct_id, chat_id=chat_id)
+        async with state.guard:
+            session_id = state.session_id
+            state.session_id = ""
+            state.pending_messages.clear()
+            state.busy = False
+            if hasattr(state, "pending_request"):
+                state.pending_request = None
+            if hasattr(state, "reply_with_voice"):
+                state.reply_with_voice = False
+            task = state.worker_task
+            state.worker_task = None
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        return session_id
+
+    async def _drop_backend_session(self, *, session_id, chat_id, acct_id):
+        return
+
+    async def _restart_chat(self, *, chat_id, acct_id):
+        if not acct_id or not chat_id:
+            return
+        session_id = await self._unbind_chat_session(chat_id=chat_id, acct_id=acct_id)
+        await self._drop_backend_session(session_id=session_id, chat_id=chat_id, acct_id=acct_id)
+        clear_chat_history(self.storage_dir, acct_id, chat_id)

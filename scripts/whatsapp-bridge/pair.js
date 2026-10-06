@@ -73,9 +73,6 @@ async function start(attempt = 0) {
         emit('failed', { reason: 'logged_out' });
         process.exit(1);
       }
-      // Transient closes before/after first QR: keep waiting or reconnect.
-      // 515 restartRequired, 408 timedOut/connectionLost, 428 connectionClosed,
-      // 503 unavailableService, 405 stale web version.
       const transient =
         reason === DisconnectReason.restartRequired ||
         reason === DisconnectReason.connectionLost ||

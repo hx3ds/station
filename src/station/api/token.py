@@ -224,7 +224,6 @@ async def handle_admin_add_prototype(request):
         prototype_id=prototype_id,
         token=token,
         prototype_version=0,
-        prototype_type="",
         db=app["db"],
         app=app,
     )

@@ -9,13 +9,44 @@ import aiohttp
 
 from station.conductor.crypto import decrypt_if_encrypted
 from station.conductor.platforms import guidance
+from station.conductor.platforms.group_settings import discord_group_notice
 from station.conductor.platforms.keyboard import discord_components, parse_keyboard
-from station.conductor.util import attachment_type_from_meta, ext_bool, ext_id, ext_int, ext_str
+from station.conductor.util import apply_sender, attachment_type_from_meta, ext_bool, ext_id, ext_int, ext_str
 from station import logger
 from station.errors import ExternalError
 from station.prototypes.boundary import ext_dict, ext_list
 
 _THREAD_CHANNEL_TYPES = {10, 11, 12}
+
+def _discord_user_sender(user):
+    if user is None:
+        return "", ""
+    username = ext_str(user.name, "username").strip()
+    global_name = ext_str(user.global_name, "global_name").strip()
+    return (global_name or username), username
+
+
+def _discord_application_flags(payload):
+    payload = ext_dict("discord application", payload)
+    app_id = ext_id(payload.get("id"), "id").strip()
+    if not app_id:
+        raise ExternalError("discord application id missing")
+    raw_new = payload.get("flags_new")
+    if raw_new is not None and raw_new != "":
+        text = ext_str(raw_new, "flags_new").strip()
+        if text:
+            try:
+                return int(text)
+            except ValueError as e:
+                raise ExternalError("discord flags_new invalid") from e
+    return ext_int(payload.get("flags"), "flags")
+
+
+def _discord_author_sender(author):
+    username = ext_str(author.get("username"), "username").strip()
+    global_name = ext_str(author.get("global_name"), "global_name").strip()
+    return (global_name or username), username
+
 
 def is_thread_channel_type(channel_type):
     return int(channel_type) in _THREAD_CHANNEL_TYPES
@@ -246,6 +277,8 @@ class DiscordIO:
         custom_id: str,
         parent_id: str = "",
         channel_type: int = 0,
+        sender_name: str = "",
+        sender_username: str = "",
     ) -> None:
         custom_id = (custom_id or "").strip()
         channel_id = (channel_id or "").strip()
@@ -273,7 +306,10 @@ class DiscordIO:
             "caption": "",
             "attachments": [],
             "msg_id": msg_id,
+            "platform": "discord",
+            "user_id": user_id,
         }
+        apply_sender(body, name=sender_name, username=sender_username)
         if message_id:
             body["reply_to"] = message_id
         if chat_type:
@@ -304,6 +340,15 @@ class DiscordIO:
             emoji = {}
         else:
             emoji = ext_dict('discord reaction emoji', emoji)
+        sender_name = ""
+        sender_username = ""
+        member = data.get("member")
+        if member is not None:
+            member = ext_dict('discord reaction member', member)
+            member_user = member.get("user")
+            if member_user is not None:
+                member_user = ext_dict('discord reaction user', member_user)
+                sender_name, sender_username = _discord_author_sender(member_user)
         await self._deliver_reaction_fields(
             acct_id=acct_id,
             user_id=ext_id(data.get("user_id"), "user_id").strip(),
@@ -312,6 +357,8 @@ class DiscordIO:
             emoji_name=ext_str(emoji.get("name"), "name").strip(),
             emoji_id=ext_id(emoji.get("id"), "id").strip() if emoji.get("id") not in (None, "") else "",
             removed=removed,
+            sender_name=sender_name,
+            sender_username=sender_username,
         )
 
     async def _deliver_reaction(self, *, acct_id: str, payload, removed: bool) -> None:
@@ -324,6 +371,7 @@ class DiscordIO:
             emoji_name = ext_str(emoji.name, "name").strip()
             if emoji.id is not None:
                 emoji_id = ext_id(emoji.id, "id").strip()
+        sender_name, sender_username = _discord_user_sender(payload.member)
         await self._deliver_reaction_fields(
             acct_id=acct_id,
             user_id=ext_id(payload.user_id, "user_id").strip(),
@@ -332,6 +380,8 @@ class DiscordIO:
             emoji_name=emoji_name,
             emoji_id=emoji_id,
             removed=removed,
+            sender_name=sender_name,
+            sender_username=sender_username,
         )
 
     async def _deliver_reaction_fields(
@@ -344,6 +394,8 @@ class DiscordIO:
         emoji_name: str,
         emoji_id: str,
         removed: bool,
+        sender_name: str = "",
+        sender_username: str = "",
     ) -> None:
         if not user_id or not channel_id or not message_id:
             return
@@ -387,7 +439,10 @@ class DiscordIO:
             "attachments": [],
             "msg_id": msg_id,
             "reply_to": message_id,
+            "platform": "discord",
+            "user_id": user_id,
         }
+        apply_sender(body, name=sender_name, username=sender_username)
         if chat_type:
             body["chat_type"] = chat_type
         await self.conductor.deliver_inbound(
@@ -508,6 +563,39 @@ class DiscordIO:
             "guild_id": guild_id,
             "parent_id": parent_id,
         }
+
+    async def group_message_notice(self, *, token: str) -> str:
+        token = (token or "").strip()
+        if not token:
+            raise ExternalError("discord token required")
+        api_base = self._api_base()
+        if api_base:
+            status, payload = await self._dsb_request(
+                method="GET",
+                token=token,
+                path="/api/v9/applications/@me",
+            )
+            if status == 401:
+                raise ExternalError("discord application unauthorized")
+            if status < 200 or status >= 300 or not isinstance(payload, dict):
+                raise ExternalError("discord application settings unavailable", reason="group_settings_unavailable")
+            return discord_group_notice(_discord_application_flags(payload))
+        import discord
+        intents = discord.Intents.none()
+        client = discord.Client(intents=intents)
+        try:
+            try:
+                await client.login(token)
+                info = await client.application_info()
+            except (discord.LoginFailure, discord.HTTPException) as e:
+                raise ExternalError("discord application settings failed: %s" % e) from e
+        finally:
+            try:
+                await client.close()
+            except Exception as e:
+                logger.error("unexpected where=discord_app_info_close error=%s", e, exc_info=e)
+        flags = int(info.flags.value)
+        return discord_group_notice(flags)
 
     async def resolve_message_chat_thread(self, *, token: str, channel_id: str, channel_meta=None):
         channel_id = (channel_id or "").strip()
@@ -792,6 +880,9 @@ class DiscordIO:
                 "content": content,
             },
             "msg_id": update_id,
+            "platform": "discord",
+            "user_id": user_id or "",
+            "chat_type": "voice",
         }
         await self.conductor.deliver_inbound(
             model_id=model_id,
@@ -953,15 +1044,19 @@ class DiscordIO:
                     member = data.get("member")
                     user = data.get("user")
                     user_id = ""
+                    sender_name = ""
+                    sender_username = ""
                     if member is not None:
                         member = ext_dict("discord interaction member", member)
                         muser = member.get("user")
                         if muser is not None:
                             muser = ext_dict("discord interaction member user", muser)
                             user_id = ext_id(muser.get("id"), "id").strip()
+                            sender_name, sender_username = _discord_author_sender(muser)
                     if not user_id and user is not None:
                         user = ext_dict("discord interaction user", user)
                         user_id = ext_id(user.get("id"), "id").strip()
+                        sender_name, sender_username = _discord_author_sender(user)
                     message = data.get("message")
                     message_id = ""
                     parent_id = ""
@@ -978,6 +1073,8 @@ class DiscordIO:
                         custom_id=custom_id,
                         parent_id=parent_id,
                         channel_type=channel_type,
+                        sender_name=sender_name,
+                        sender_username=sender_username,
                     )
                     continue
                 if event_type == "READY":
@@ -1253,7 +1350,7 @@ class DiscordIO:
                         stickers = resolved.stickers or []
                         if atts or stickers:
                             reply_snippet = "(attachment)"
-            reply_to_text = guidance.reply_snippet(reply_snippet)
+            reply_to_text = guidance.telegram_reply_snippet(reply_snippet)
             content = guidance.inject_reply_context(content, reply_to_text)
             if not content and attachments:
                 for a in attachments:
@@ -1271,7 +1368,11 @@ class DiscordIO:
                 "caption": "",
                 "attachments": attachments,
                 "msg_id": msg_id,
+                "platform": "discord",
+                "user_id": author_id or "",
             }
+            sender_name, sender_username = _discord_user_sender(message.author)
+            apply_sender(body, name=sender_name, username=sender_username)
             if reply_to:
                 body["reply_to"] = reply_to
             if reply_to_text:
@@ -1313,6 +1414,7 @@ class DiscordIO:
             custom_id = ext_str(data.get("custom_id"), "custom_id").strip()
             user = interaction.user
             user_id = ext_id(user.id, "user.id").strip() if user is not None else ""
+            sender_name, sender_username = _discord_user_sender(user)
             channel = interaction.channel
             channel_id = ext_id(interaction.channel_id, "channel_id").strip()
             parent_id = _discord_channel_parent_id(channel) if channel is not None else ""
@@ -1328,6 +1430,8 @@ class DiscordIO:
                 custom_id=custom_id,
                 parent_id=parent_id,
                 channel_type=channel_type,
+                sender_name=sender_name,
+                sender_username=sender_username,
             )
 
         @client.event
@@ -1641,7 +1745,7 @@ class DiscordIO:
                                     isinstance(ref_stickers, list) and ref_stickers
                                 ):
                                     reply_snippet = "(attachment)"
-                        reply_to_text = guidance.reply_snippet(reply_snippet)
+                        reply_to_text = guidance.telegram_reply_snippet(reply_snippet)
                         content = guidance.inject_reply_context(content, reply_to_text)
                         if not content and attachments:
                             for a in attachments:
@@ -1659,7 +1763,11 @@ class DiscordIO:
                             "caption": "",
                             "attachments": attachments,
                             "msg_id": msg_id,
+                            "platform": "discord",
+                            "user_id": author_id or "",
                         }
+                        sender_name, sender_username = _discord_author_sender(author)
+                        apply_sender(body, name=sender_name, username=sender_username)
                         if reply_to:
                             body["reply_to"] = reply_to
                         if reply_to_text:

@@ -1,5 +1,4 @@
 import asyncio
-import os
 
 from station import logger
 from station.prototypes.device_auth import PrototypeDeviceAuth, format_device_login_start
@@ -12,9 +11,6 @@ class GrokAuthFlow(PrototypeDeviceAuth):
     def _resolve_api_key(self, settings):
         if settings.api_key:
             return settings.api_key
-        value = os.getenv("XAI_API_KEY")
-        if value and value.strip():
-            return value.strip()
         return ""
 
     async def _resolve_access_token(self, *, acct_id, settings):
@@ -57,8 +53,7 @@ class GrokAuthFlow(PrototypeDeviceAuth):
                     acct_id=acct_id,
                     reply_to=reply_to,
                     platform=platform,
-                    chat_type=chat_type,
-                )
+                    chat_type=chat_type)
 
         def start_message(pending):
             return format_device_login_start(
@@ -66,7 +61,7 @@ class GrokAuthFlow(PrototypeDeviceAuth):
                 verification_uri=pending.verification_uri,
                 user_code=pending.user_code,
                 verification_uri_complete=pending.verification_uri_complete,
-                commands="/login · /logout · /usage · /generate",
+                commands="/help · /login · /logout · /usage · /image · /video · /settings · /key",
             )
 
         return await self._run_device_auth(
@@ -92,8 +87,7 @@ class GrokAuthFlow(PrototypeDeviceAuth):
                 acct_id=acct_id,
                 reply_to=reply_to,
                 platform=platform,
-                chat_type=chat_type,
-            )
+                chat_type=chat_type)
             return
         reply = await self._start_login(
             acct_id=acct_id,
@@ -108,5 +102,4 @@ class GrokAuthFlow(PrototypeDeviceAuth):
             acct_id=acct_id,
             reply_to=reply_to,
             platform=platform,
-            chat_type=chat_type,
-        )
+            chat_type=chat_type)

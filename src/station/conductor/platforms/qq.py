@@ -7,14 +7,16 @@ import re
 import tempfile
 import time
 import uuid
+from urllib.parse import quote
 
 import aiohttp
 
 from station.conductor.crypto import decrypt_if_encrypted
 from station.conductor.platforms import guidance
+from station.conductor.platforms.group_settings import qq_group_notice, qq_settings_denied
 from station.conductor.platforms.keyboard import join_text_and_keyboard, parse_keyboard, qq_keyboard
 from station.conductor.platforms.policy import allows_media
-from station.conductor.util import attachment_type_from_meta, ext_id, ext_int, ext_str
+from station.conductor.util import apply_sender, attachment_type_from_meta, ext_id, ext_int, ext_str
 from station import logger
 from station.errors import ExternalError
 from station.prototypes.boundary import ext_dict, ext_float, ext_list
@@ -358,6 +360,49 @@ class QQIO:
                 raise RuntimeError(f"QQ API [{status}] {path}: {msg}")
             return data
 
+    async def group_message_notice(self, *, token, chat_id) -> str:
+        chat_id = (chat_id or "").strip()
+        if not chat_id:
+            raise ExternalError("qq chat id required")
+        path = "/v2/groups/%s/bot_state" % quote(chat_id, safe="")
+        _, _, access = await self._creds_from_token(token)
+        url = f"{self._api_base()}{path}"
+        try:
+            async with self.session.request(
+                "GET",
+                url,
+                headers=self._auth_headers(access),
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
+                status = int(resp.status)
+                try:
+                    data = await resp.json(content_type=None)
+                except (aiohttp.ContentTypeError, json.JSONDecodeError, ValueError):
+                    raw = await resp.text()
+                    if qq_settings_denied(status, 0, raw):
+                        raise ExternalError("qq group bot state unavailable", reason="group_settings_unavailable")
+                    raise ExternalError("qq bot state response invalid")
+        except aiohttp.ClientError as e:
+            raise ExternalError("qq bot state failed: %s" % e) from e
+        data = ext_dict("qq bot state", data)
+        if status in (403, 404, 429):
+            raise ExternalError("qq group bot state unavailable", reason="group_settings_unavailable")
+        code = 0
+        if data.get("code") is not None:
+            code = ext_int(data.get("code"), "code")
+        if code == 0 and data.get("err_code") is not None:
+            code = ext_int(data.get("err_code"), "err_code")
+        message = ""
+        if data.get("message") is not None:
+            message = ext_str(data.get("message"), "message")
+        if qq_settings_denied(status, code, message):
+            raise ExternalError("qq group bot state unavailable", reason="group_settings_unavailable")
+        if status < 200 or status >= 300:
+            raise ExternalError("qq bot state failed: %s" % (message or status))
+        if data.get("recv_msg_setting") is None:
+            raise ExternalError("qq bot state missing recv_msg_setting")
+        return qq_group_notice(ext_str(data.get("recv_msg_setting"), "recv_msg_setting"))
+
     async def _get_gateway_url(self, *, token, server=None):
         data = await self._api_request(token=token, method="GET", path=GATEWAY_PATH, server=server)
         url = ext_str(data.get("url"), "url").strip()
@@ -648,10 +693,20 @@ class QQIO:
         if not chat_id:
             return False
         chat_type = self._guess_chat_type(acct_id, chat_id)
-        if not allows_media("qq", chat_type):
+        if chat_type in ("private", "c2c"):
+            native = "c2c"
+            unified = "private"
+        elif chat_type == "group":
+            native = "group"
+            unified = "group"
+        else:
+            native = chat_type
+            unified = chat_type
+        if not allows_media("qq", unified):
             return False
-        if chat_type not in ("c2c", "group"):
+        if native not in ("c2c", "group"):
             return False
+        chat_type = native
         if not reply_to:
             reply_to = self._last_msgs(acct_id).get(chat_id)
         name = (filename or "file").strip() or "file"
@@ -922,6 +977,7 @@ class QQIO:
         raw=None,
         reply_to="",
         reply_to_text="",
+        sender_username="",
     ):
         chat_id = (chat_id or "").strip()
         if not chat_id:
@@ -967,7 +1023,9 @@ class QQIO:
             "msg_id": (msg_id or ""),
             "platform": "qq",
             "chat_type": (chat_kind or ""),
+            "user_id": user_id or "",
         }
+        apply_sender(body, username=sender_username)
         if reply_to:
             body["reply_to"] = reply_to
         if reply_to_text:
@@ -1090,6 +1148,7 @@ class QQIO:
             raw=raw,
             reply_to=quote_reply,
             reply_to_text=reply_to_text,
+            sender_username=ext_str(author.get("username"), "username").strip(),
         )
         if ok:
             self._mark_seen(acct_id, msg_id)

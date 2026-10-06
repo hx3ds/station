@@ -29,7 +29,6 @@ class PrototypeWebRTC:
         await self.send_proxy(
             method="send_webrtc",
             chat_id=chat_id,
-            request_id=request_id if request_id else None,
             params={
                 "webrtc_type": event_type,
                 "webrtc_content": json.dumps(content),
@@ -146,11 +145,9 @@ class PrototypeWebRTC:
                 await self.send_outbound(
                     text="This model does not support voice calls. Continuing as a text channel.",
                     chat_id=chat_id,
-                    request_id=request_id if request_id else None,
                     acct_id=acct_id if acct_id else None,
                     platform=platform,
-                    chat_type=chat_type,
-                )
+                    chat_type=chat_type)
                 content = self._decode_webrtc_content(webrtc.get("content"))
                 call_id = content.get("call_id")
                 if call_id is not None:

@@ -32,8 +32,7 @@ class GrokVoiceBridge:
                 chat_id=chat_key,
                 acct_id=acct_key,
                 platform=platform,
-                chat_type=chat_type,
-            )
+                chat_type=chat_type)
             return None
 
         async def on_transcript(kind, text):
@@ -43,8 +42,7 @@ class GrokVoiceBridge:
                 chat_id=chat_key,
                 acct_id=acct_key,
                 platform=platform,
-                chat_type=chat_type,
-            )
+                chat_type=chat_type)
 
         session = GrokRealtimeSession(
             access_token=access_token,
@@ -67,8 +65,7 @@ class GrokVoiceBridge:
                 chat_id=chat_key,
                 acct_id=acct_key,
                 platform=platform,
-                chat_type=chat_type,
-            )
+                chat_type=chat_type)
             return None
 
         async with self._realtime_guard:
@@ -157,8 +154,7 @@ class GrokVoiceBridge:
                 chat_id=state.chat_id,
                 acct_id=state.acct_id,
                 platform=state.platform,
-                chat_type=state.chat_type,
-            )
+                chat_type=state.chat_type)
             return
         state.mute_live_audio = True
         try:
@@ -173,8 +169,7 @@ class GrokVoiceBridge:
                     chat_id=state.chat_id,
                     acct_id=state.acct_id,
                     platform=state.platform,
-                    chat_type=state.chat_type,
-                )
+                    chat_type=state.chat_type)
                 return
             pcm = frames
             if channels == 2:

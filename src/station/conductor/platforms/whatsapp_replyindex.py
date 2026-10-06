@@ -11,7 +11,7 @@ def record_reply_text(chat_id, message_id, text):
     global _order
     chat_id = (chat_id or "").strip()
     message_id = (message_id or "").strip()
-    text = guidance.reply_snippet(text)
+    text = guidance.telegram_reply_snippet(text)
     if not chat_id or not message_id or not text:
         return
     key = _key(chat_id, message_id)

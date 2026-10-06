@@ -6,6 +6,7 @@ import uuid
 from station import logger
 from station.prototypes.attachments import attachment_str
 from station.prototypes.fs_paths import sanitize_path_component
+from station.prototypes.outbound_files import STATION_OUTBOUND_HINT
 
 MIME_SUFFIXES = {
     "image/png": ".png",
@@ -50,6 +51,8 @@ class WorkspaceAttachmentStaging:
             "Non-image attachments have been copied into the %s workspace. "
             "Inspect them from these paths if needed:\n" % product_name
             + "\n".join(manifest_lines)
+            + "\n"
+            + STATION_OUTBOUND_HINT
         )
 
     async def _stage_attachment(self, *, attachment, acct_id, chat_id):

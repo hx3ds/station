@@ -4,7 +4,7 @@ import aiohttp
 
 from station.client.retry import CircuitOpen, RetryableError, is_transient_status, retry_transient
 from station.errors import ExternalError
-from station.prototypes.boundary import ext_dict
+from station.prototypes.boundary import ext_dict, ext_require
 from station import logger
 
 async def _request_json(*, session, method, url, headers, json_payload=None):
@@ -26,8 +26,9 @@ async def _request_json(*, session, method, url, headers, json_payload=None):
 
 def _require_result_data(body, *, where):
     body = ext_dict("%s body" % where, body)
-    if body.get("result") != 0:
-        raise ExternalError("%s result=%s" % (where, body.get("result")))
+    result = ext_require("%s result" % where, body.get("result"), (int,))
+    if result != 0:
+        raise ExternalError("%s result=%s" % (where, result))
     data = body.get("data")
     if data is not None:
         data = ext_dict("%s data" % where, data)

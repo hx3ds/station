@@ -225,10 +225,12 @@ async def _handle_reception(request):
         return version_resp
 
     request_id = request.headers.get("X-Request-Id", "")
-    chat_id = request.headers.get("X-Chat-Id")
+    chat_id = request.headers.get("X-Chat-Id") or ""
     acct_id = request.headers.get("X-Acct-Id") or ""
     if not acct_id:
         return relay_error(reason="missing_acct_id", msg="Missing acct_id", status=400)
+    if not chat_id:
+        return relay_error(reason="missing_chat_id", msg="Missing chat_id", status=400)
     model_id = request.headers.get("X-Model-Id", model_id)
 
     dedupe_key = ""

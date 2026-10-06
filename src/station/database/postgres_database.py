@@ -16,6 +16,7 @@ from station.database.file_registry import (
     row_to_file_dict,
 )
 from station.errors import ExternalError, InternalError
+from station.prototypes.boundary import ext_dict, ext_list
 from station import logger
 
 class PostgresDatabase(AsyncDatabase):
@@ -314,8 +315,8 @@ class PostgresDatabase(AsyncDatabase):
             )
         if not row:
             return None
-        settings = json.loads(row["settings"]) if row["settings"] else {}
-        accts = json.loads(row["accts"]) if row["accts"] else []
+        settings = ext_dict("model settings", json.loads(row["settings"])) if row["settings"] else {}
+        accts = ext_list("model accts", json.loads(row["accts"])) if row["accts"] else []
         return {
             "model_id": row["model_id"],
             "prototype_id": row["prototype_id"],
@@ -460,7 +461,7 @@ class PostgresDatabase(AsyncDatabase):
         name = data.get("name", "")
         token = data.get("token", "")
         access_point = data.get("access_point", "")
-        proto_type = data.get("type", "token")
+        proto_type = data.get("type", "subscription")
         ava = data.get("ava", False)
         version = data.get("version")
         raw_data = json.dumps(data)
@@ -496,7 +497,7 @@ class PostgresDatabase(AsyncDatabase):
             row = await conn.fetchrow("SELECT raw_data FROM prototypes WHERE prototype_id = $1", prototype_id)
         if not row or not row["raw_data"]:
             return None
-        return json.loads(row["raw_data"])
+        return ext_dict("prototype raw_data", json.loads(row["raw_data"]))
 
     async def is_duplicate_request(self, key: str) -> bool:
         if not key:
@@ -567,7 +568,7 @@ class PostgresDatabase(AsyncDatabase):
                     "job_id": row["job_id"],
                     "model_id": row["model_id"],
                     "kind": row["kind"],
-                    "payload": json.loads(row["payload"]),
+                    "payload": ext_dict("inbound payload", json.loads(row["payload"])),
                     "created_at": row["created_at"],
                 }
             )
@@ -851,7 +852,7 @@ class PostgresDatabase(AsyncDatabase):
             )
         if not row or not row["state_json"]:
             return None
-        return json.loads(row["state_json"])
+        return ext_dict("runtime state", json.loads(row["state_json"]))
 
     async def set_local_account_runtime_state(
         self,

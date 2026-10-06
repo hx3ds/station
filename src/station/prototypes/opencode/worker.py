@@ -1,19 +1,22 @@
 from dataclasses import dataclass
+import asyncio
 import json
 
 from station import logger
 from station.prototypes.boundary import ext_dict, ext_int, ext_str
 from station.prototypes.bridge_worker import PrototypeBridgeWorker
+from station.prototypes.chat_history import load_session_id, save_session_id
 
 @dataclass(slots=True)
 class PendingTurnMessage:
     parts: list
+    reply_with_voice: bool = False
 
 class OpenCodeWorker(PrototypeBridgeWorker):
     def _bridge_worker_error_text(self, error):
         return "OpenCode bridge error: %s" % error
 
-    async def _enqueue_parts(self, *, parts, chat_id, acct_id, platform="", chat_type=""):
+    async def _enqueue_parts(self, *, parts, chat_id, acct_id, platform="", chat_type="", reply_with_voice=False):
         state = await self._get_chat_state(acct_id=acct_id, chat_id=chat_id)
         gateway = await self._ensure_gateway()
         await self._enqueue_pending(
@@ -21,31 +24,32 @@ class OpenCodeWorker(PrototypeBridgeWorker):
             gateway=gateway,
             chat_id=chat_id,
             acct_id=acct_id,
-            item=PendingTurnMessage(parts=parts),
+            item=PendingTurnMessage(parts=parts, reply_with_voice=reply_with_voice),
             platform=platform,
             chat_type=chat_type,
         )
 
     async def _bridge_worker_loop(self, *, gateway, state, chat_id, acct_id):
         while True:
-            parts = await self._pop_batched_turn(state=state)
-            if parts is None:
+            batched = await self._pop_batched_turn(state=state)
+            if batched is None:
                 return
+            parts, reply_with_voice = batched
 
-            if not state.session_id:
-                state.session_id = await gateway.session_create(title="station:%s:%s" % (acct_id, chat_id))
-                gateway.bind_session(session_id=state.session_id, acct_id=acct_id, chat_id=chat_id)
+            await self._ensure_chat_session(gateway=gateway, state=state, acct_id=acct_id, chat_id=chat_id)
 
             state.busy = True
             try:
                 await gateway.prompt_async(session_id=state.session_id, parts=parts)
                 reply = await self._drain_session_events(gateway=gateway, state=state)
+                await gateway.maybe_compact_session(state.session_id)
             finally:
                 state.busy = False
 
             if reply:
-                await self.send_outbound(
+                await self._deliver_turn_reply(
                     text=reply,
+                    include_voice=reply_with_voice,
                     chat_id=chat_id,
                     acct_id=acct_id,
                     platform=state.platform,
@@ -55,19 +59,44 @@ class OpenCodeWorker(PrototypeBridgeWorker):
     async def _pop_batched_turn(self, *, state):
         def merge_many(messages):
             merged = []
+            reply_with_voice = False
             for index, message in enumerate(messages, start=1):
+                reply_with_voice = reply_with_voice or message.reply_with_voice
                 for item in message.parts:
                     copied = dict(item)
                     if copied.get("type") == "text":
                         copied["text"] = self._queued_followup_label(index, copied["text"]).strip()
                     merged.append(copied)
-            return merged
+            return merged, reply_with_voice
 
         return await self._pop_batched_items(
             state=state,
-            merge_one=lambda message: list(message.parts),
+            merge_one=lambda message: (list(message.parts), message.reply_with_voice),
             merge_many=merge_many,
         )
+
+    async def _drop_backend_session(self, *, session_id, chat_id, acct_id):
+        gateway = self._gateway
+        if gateway is None or not session_id:
+            return
+        gateway.unbind_session(session_id)
+
+    async def _ensure_chat_session(self, *, gateway, state, acct_id, chat_id):
+        if state.session_id:
+            gateway.bind_session(session_id=state.session_id, acct_id=acct_id, chat_id=chat_id)
+            return state.session_id
+        stored = load_session_id(self.storage_dir, acct_id, chat_id)
+        if stored:
+            info = await gateway.session_get(stored)
+            if info is not None:
+                state.session_id = stored
+                gateway.bind_session(session_id=stored, acct_id=acct_id, chat_id=chat_id)
+                return stored
+        session_id = await gateway.session_create(title="station:%s:%s" % (acct_id, chat_id))
+        state.session_id = session_id
+        save_session_id(self.storage_dir, acct_id, chat_id, session_id)
+        gateway.bind_session(session_id=session_id, acct_id=acct_id, chat_id=chat_id)
+        return session_id
 
     async def _drain_session_events(self, *, gateway, state):
         if not state.session_id:
@@ -82,6 +111,13 @@ class OpenCodeWorker(PrototypeBridgeWorker):
 
         while True:
             event = await queue.get()
+            fatal = self._fatal_retry_message(event)
+            if fatal is not None:
+                logger.error("OpenCode fatal retry session_id=%s error=%s", state.session_id, fatal)
+                await gateway.session_abort(state.session_id)
+                await self._discard_until_idle(queue)
+                extra_lines.append("OpenCode error: %s" % fatal)
+                return self._join_reply(text_parts, text_order, extra_lines, user_message_ids, part_message_ids) or "OpenCode error"
             reply = self._consume_event(
                 event=event,
                 text_parts=text_parts,
@@ -92,6 +128,48 @@ class OpenCodeWorker(PrototypeBridgeWorker):
             )
             if reply is not None:
                 return reply
+
+    def _fatal_retry_message(self, event):
+        if event.type != "session.status":
+            return None
+        status = event.payload.get("status")
+        if status is None:
+            return None
+        status = ext_dict("session.status status", status)
+        status_type = ext_str("session.status type", status.get("type"))
+        if status_type != "retry":
+            return None
+        message = ext_str("session.status message", status.get("message"))
+        lowered = message.lower()
+        for marker in (
+            "cannot connect",
+            "socket",
+            "econn",
+            "fetch failed",
+            "timed out",
+            "timeout",
+            "enotfound",
+            "network",
+            "closed unexpectedly",
+            "other side closed",
+        ):
+            if marker in lowered:
+                return message or "OpenCode error"
+        return None
+
+    async def _discard_until_idle(self, queue):
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 5
+        while loop.time() < deadline:
+            timeout = deadline - loop.time()
+            if timeout <= 0:
+                return
+            try:
+                event = await asyncio.wait_for(queue.get(), timeout=timeout)
+            except asyncio.TimeoutError:
+                return
+            if event.type in {"session.idle", "session.error"}:
+                return
 
     def _consume_event(self, *, event, text_parts, text_order, extra_lines, user_message_ids, part_message_ids):
 

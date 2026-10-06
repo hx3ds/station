@@ -6,7 +6,6 @@ build-backend = "setuptools.build_meta"
 name = "station"
 version = "0.1.0"
 description = "Station runtime package."
-readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12"
 dynamic = ["dependencies"]

@@ -3,6 +3,7 @@ import aiohttp
 from station import logger
 from station.prototypes.boundary import ext_str
 from station.prototypes.device_auth import PrototypeDeviceAuth, local_llm_auth_reply
+from station.prototypes.model_config import SECRET_DELETE_HINT
 
 from .config import OPENCODE_LOCAL_PROVIDER
 
@@ -26,8 +27,7 @@ class OpenCodeAuthFlow(PrototypeDeviceAuth):
                 acct_id=acct_id,
                 reply_to=reply_to,
                 platform=platform,
-                chat_type=chat_type,
-            )
+                chat_type=chat_type)
             return
         if cmd == "/logout":
             await self._cancel_device_auth(acct_id=acct_id)
@@ -41,8 +41,7 @@ class OpenCodeAuthFlow(PrototypeDeviceAuth):
                 acct_id=acct_id,
                 reply_to=reply_to,
                 platform=platform,
-                chat_type=chat_type,
-            )
+                chat_type=chat_type)
             return
         reply = await self._start_login(
             acct_id=acct_id,
@@ -57,8 +56,7 @@ class OpenCodeAuthFlow(PrototypeDeviceAuth):
             acct_id=acct_id,
             reply_to=reply_to,
             platform=platform,
-            chat_type=chat_type,
-        )
+            chat_type=chat_type)
 
     async def _ensure_provider_auth(self, *, acct_id, chat_id, reply_to=None, platform="", chat_type=""):
         settings = self._launch_settings()
@@ -95,8 +93,7 @@ class OpenCodeAuthFlow(PrototypeDeviceAuth):
                 acct_id=acct_id,
                 reply_to=reply_to,
                 platform=platform,
-                chat_type=chat_type,
-            )
+                chat_type=chat_type)
             return False
         reply = await self._start_login(
             acct_id=acct_id,
@@ -111,8 +108,7 @@ class OpenCodeAuthFlow(PrototypeDeviceAuth):
             acct_id=acct_id,
             reply_to=reply_to,
             platform=platform,
-            chat_type=chat_type,
-        )
+            chat_type=chat_type)
         return False
 
     async def _apply_provider_api_key(self, gateway, provider_id, api_key):
@@ -155,8 +151,7 @@ class OpenCodeAuthFlow(PrototypeDeviceAuth):
                     acct_id=acct_id,
                     reply_to=reply_to,
                     platform=platform,
-                    chat_type=chat_type,
-                )
+                    chat_type=chat_type)
 
         def start_message(pending):
             lines = ["Sign in to OpenCode xAI (SuperGrok / device login):"]
@@ -172,7 +167,8 @@ class OpenCodeAuthFlow(PrototypeDeviceAuth):
                 [
                     "",
                     "Waiting for OpenCode to finish OAuth...",
-                    "Commands: /login · /logout",
+                    "Commands: /login · /logout · /key",
+                    SECRET_DELETE_HINT,
                 ]
             )
             return "\n".join(lines)

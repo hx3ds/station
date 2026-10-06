@@ -10,6 +10,7 @@ KIND_ENTRYPOINTS = {
     "opencode": "station.prototypes.opencode.prototype:OpenCodePrototype",
     "codex": "codex_bridge_prototype.prototype:CodexBridgePrototype",
     "pi": "station.prototypes.pi.prototype:PiPrototype",
+    "cursor": "station.prototypes.cursor.prototype:CursorPrototype",
 }
 
 _class_cache = {}

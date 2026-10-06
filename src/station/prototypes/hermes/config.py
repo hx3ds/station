@@ -7,8 +7,8 @@ from station.prototypes.boundary import ext_dict, ext_mapping_get, ext_require, 
 from station.prototypes.launch_settings import (
     XAI_PROVIDERS,
     apply_local_provider_env,
+    child_process_env,
     collect_provider_env,
-    env_str,
     launch_sections,
     merge_launch_settings,
     resolve_local_llm,
@@ -46,27 +46,14 @@ def load_saved_provider(storage_dir):
     return {"provider": provider, "model": ext_str("hermes config model.default", model.get("default"))}
 
 
-def _resolve_python(hermes):
+def _resolve_python(hermes, hermes_root):
     explicit = ext_mapping_get(hermes, "python", (str,), "").strip()
     if explicit:
         return explicit
-    for key in ("HERMES_BRIDGE_HERMES_PYTHON", "HERMES_PYTHON", "PYTHON"):
-        value = env_str(key)
-        if value:
-            return value
-
-    venv = env_str("VIRTUAL_ENV")
-    if venv:
-        for rel in ("bin/python", "bin/python3"):
-            candidate = Path(venv) / rel
-            if candidate.exists():
-                return str(candidate)
-
     for rel in (".venv/bin/python", ".venv/bin/python3"):
-        candidate = HERMES_ROOT / rel
+        candidate = hermes_root / rel
         if candidate.exists():
             return str(candidate)
-
     return "python3"
 
 
@@ -81,7 +68,6 @@ class HermesLaunchSettings:
     fast: bool
     approvals_mode: str
     voice_reply_mode: str
-    voice_delivery_method: str
     extra_env: dict
     config_overrides: dict
     local_llm_base_url: str
@@ -89,6 +75,9 @@ class HermesLaunchSettings:
     local_llm_context_window: int
     local_llm_max_output: int
     disabled_toolsets: list
+    api_key: str
+    voice: dict
+    base_url: str
 
     def uses_local_llm(self):
         return bool(self.local_llm_base_url)
@@ -108,22 +97,25 @@ class HermesLaunchSettings:
         return ",".join(name for name in DEFAULT_TUI_TOOLSETS if name not in disabled)
 
     def apply_process_env(self, env):
-        merged = dict(env)
-        merged.update(self.extra_env)
+        merged = child_process_env(self.extra_env, base=env)
         if self.uses_local_llm():
             return apply_local_provider_env(merged, base_url=self.local_llm_base_url)
         return merged
 
     @classmethod
-    def from_model_settings(cls, model_settings, *, default_workspace, config_file=None):
-        raw = merge_launch_settings(model_settings, config_file=config_file)
+    def from_model_settings(cls, model_settings, *, default_workspace, config_file=None, secret_file=None, overlay=None):
+        raw = merge_launch_settings(
+            model_settings,
+            config_file=config_file,
+            secret_file=secret_file,
+            overlay=overlay,
+        )
 
-        sections = launch_sections(raw, "hermes", "model", "voice", "keys", "env", "local_llm", "config")
+        sections = launch_sections(raw, "hermes", "model", "voice", "keys", "local_llm", "config")
         hermes = sections["hermes"]
         model = sections["model"]
         voice = sections["voice"]
         keys = sections["keys"]
-        env_section = sections["env"]
         local_llm = sections["local_llm"]
         config_overrides = dict(sections["config"])
         disabled_toolsets = ext_mapping_get(config_overrides, "disabled_toolsets", (list,), None, allow_none=True)
@@ -139,18 +131,14 @@ class HermesLaunchSettings:
             config_overrides["memory_enabled"] = ext_mapping_get(model, "memory_enabled", (bool,), False)
 
         hermes_root = Path(
-            ext_mapping_get(hermes, "root", (str,), "").strip()
-            or env_str("HERMES_BRIDGE_HERMES_ROOT")
-            or str(HERMES_ROOT)
+            ext_mapping_get(hermes, "root", (str,), "").strip() or str(HERMES_ROOT)
         ).expanduser()
 
         workspace_dir = (
-            ext_mapping_get(hermes, "workspace", (str,), "").strip()
-            or env_str("HERMES_BRIDGE_WORKSPACE")
-            or default_workspace
+            ext_mapping_get(hermes, "workspace", (str,), "").strip() or default_workspace
         )
 
-        voice_reply_mode, voice_delivery_method = voice_settings_from_mapping(voice)
+        voice_reply_mode = voice_settings_from_mapping(voice)
 
         provider, model_id = split_provider_model(
             ext_mapping_get(model, "model", (str,), "").strip(),
@@ -161,7 +149,7 @@ class HermesLaunchSettings:
             provider = saved["provider"]
             model_id = saved["model"] or model_id
 
-        extra_env = collect_provider_env(keys, env_section)
+        extra_env = collect_provider_env(keys)
         if (provider or "").strip().lower() in DEVICE_CODE_PROVIDERS:
             local_llm_base_url = ""
             local_llm_api_key = ""
@@ -186,7 +174,7 @@ class HermesLaunchSettings:
 
         return cls(
             hermes_root=hermes_root,
-            hermes_python=_resolve_python(hermes),
+            hermes_python=_resolve_python(hermes, hermes_root),
             workspace_dir=workspace_dir,
             model=model_id,
             provider=provider,
@@ -194,7 +182,6 @@ class HermesLaunchSettings:
             fast=ext_mapping_get(model, "fast", (bool,), False),
             approvals_mode=ext_mapping_get(model, "approvals_mode", (str,), "").strip() or "always",
             voice_reply_mode=voice_reply_mode,
-            voice_delivery_method=voice_delivery_method,
             extra_env=extra_env,
             config_overrides=config_overrides,
             local_llm_base_url=local_llm_base_url,
@@ -202,4 +189,7 @@ class HermesLaunchSettings:
             local_llm_context_window=local_llm_context_window,
             local_llm_max_output=local_llm_max_output,
             disabled_toolsets=disabled_toolsets,
+            api_key=local_llm_api_key,
+            voice=dict(voice),
+            base_url=local_llm_base_url,
         )

@@ -9,9 +9,10 @@ import aiohttp
 
 from station.conductor.crypto import decrypt_if_encrypted
 from station.conductor.platforms import guidance
-from station.conductor.util import attachment_type_from_meta, normalize_http_url, ext_str, ext_id
+from station.conductor.util import apply_sender, attachment_type_from_meta, normalize_http_url, ext_str, ext_id
 from station import logger
-from station.prototypes.boundary import ext_dict, ext_list
+from station.errors import ExternalError
+from station.prototypes.boundary import ext_dict, ext_list, ext_str as boundary_ext_str
 
 _MATRIX_CLIENT_API_PREFIX = "/_matrix/client/v3"
 _MATRIX_MEDIA_API_PREFIX = "/_matrix/media/v3"
@@ -25,6 +26,41 @@ class MatrixIO:
         self._e2ee_crypto_dbs: dict[str, Any] = {}
         self._e2ee_lock = asyncio.Lock()
         self._e2ee_delivery_failed: dict[str, bool] = {}
+        self._direct_rooms = set()
+
+    def _note_direct_rooms(self, sync):
+        account_data = sync.get("account_data")
+        if account_data is None:
+            return
+        account_data = ext_dict("matrix account_data", account_data)
+        events = account_data.get("events")
+        if events is None:
+            return
+        events = ext_list("matrix account_data events", events)
+        for evt in events:
+            evt = ext_dict("matrix account_data event", evt)
+            if boundary_ext_str("type", evt.get("type")) != "m.direct":
+                continue
+            content = evt.get("content")
+            if content is None:
+                continue
+            content = ext_dict("matrix m.direct", content)
+            rooms = set()
+            for ids in content.values():
+                if type(ids) is not list:
+                    raise ExternalError("m.direct room list must be a list")
+                for room in ids:
+                    room = boundary_ext_str("room_id", room).strip()
+                    if room:
+                        rooms.add(room)
+            self._direct_rooms = rooms
+
+    def _stamp_matrix(self, body, *, room_id, sender):
+        body["platform"] = "matrix"
+        body["user_id"] = sender or ""
+        body["chat_type"] = "direct" if room_id in self._direct_rooms else "room"
+        apply_sender(body, username=sender or "")
+        return body
 
     @property
     def session(self) -> aiohttp.ClientSession:
@@ -449,7 +485,13 @@ class MatrixIO:
                 if not model_id:
                     self._e2ee_delivery_failed[acct_id] = True
                     return
-                ok = await self.conductor.deliver_inbound(model_id=model_id, acct_id=acct_id, chat_id=room_id, request_id=event_id, body=body)
+                ok = await self.conductor.deliver_inbound(
+                    model_id=model_id,
+                    acct_id=acct_id,
+                    chat_id=room_id,
+                    request_id=event_id,
+                    body=self._stamp_matrix(body, room_id=room_id, sender=sender),
+                )
                 if not ok:
                     self._e2ee_delivery_failed[acct_id] = True
 
@@ -482,7 +524,7 @@ class MatrixIO:
                     acct_id=acct_id,
                     chat_id=room_id,
                     request_id=event_id,
-                    body={"webrtc": webrtc},
+                    body=self._stamp_matrix({"webrtc": webrtc}, room_id=room_id, sender=sender),
                 )
                 if not ok:
                     self._e2ee_delivery_failed[acct_id] = True
@@ -639,7 +681,7 @@ class MatrixIO:
         filename = (filename or "").strip() or "file"
         msgtype = (msgtype or "").strip() or "m.file"
         content_type = (content_type or "").strip() or "application/octet-stream"
-        caption_text = (caption or "").strip() or filename
+        caption_text, html = guidance.prepare_matrix_media_caption(caption or "", filename)
 
         if self.encryption_enabled:
             client = await self._ensure_e2ee_client(acct_id=acct_id, homeserver=homeserver, access_token=access_token)
@@ -659,6 +701,9 @@ class MatrixIO:
                 "body": caption_text,
                 "info": {"mimetype": content_type, "size": len(file_bytes)},
             }
+            if html:
+                msg_content["format"] = "org.matrix.custom.html"
+                msg_content["formatted_body"] = html
             if reply_to:
                 msg_content["m.relates_to"] = {"m.in_reply_to": {"event_id": reply_to.strip()}}
             if encrypted_file is not None:
@@ -680,6 +725,9 @@ class MatrixIO:
             "info": {"mimetype": content_type, "size": len(file_bytes)},
             "url": uri,
         }
+        if html:
+            msg_content["format"] = "org.matrix.custom.html"
+            msg_content["formatted_body"] = html
         if reply_to:
             msg_content["m.relates_to"] = {"m.in_reply_to": {"event_id": reply_to.strip()}}
         if is_voice:
@@ -796,6 +844,7 @@ class MatrixIO:
                     backoff = min(backoff * 1.5, 30.0)
                     continue
                 backoff = 1.0
+                self._note_direct_rooms(sync)
                 nb = ext_str(sync.get("next_batch"), "next_batch").strip()
 
                 rooms = sync.get("rooms")
@@ -849,6 +898,7 @@ class MatrixIO:
                             delivery_failed = True
                             break
                         msg_body = {"webrtc": body.get("webrtc")} if "webrtc" in body else body
+                        self._stamp_matrix(msg_body, room_id=room_id, sender=sender)
                         webrtc = msg_body.get("webrtc")
                         if webrtc is not None:
                             webrtc = ext_dict('matrix webrtc body', webrtc)
@@ -896,6 +946,7 @@ class MatrixIO:
                     await asyncio.sleep(0.1)
                     continue
                 sync_data = ext_dict('matrix e2ee sync', sync_data)
+                self._note_direct_rooms(sync_data)
                 tasks = client.handle_sync(sync_data)
                 if tasks:
                     await asyncio.gather(*tasks)

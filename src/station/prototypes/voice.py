@@ -2,15 +2,14 @@ import os
 
 from station import logger
 from station.prototypes.voice_policy import (
+    is_ogg_opus_audio,
     should_send_voice_reply,
-    voice_delivery_attachment_type,
-    voice_delivery_mime,
-    voice_delivery_suffix,
+    transcode_audio_to_ogg_opus,
 )
 
 
 class PrototypeVoice:
-    async def _prepare_voice_input(self, attachments, *, transcribe):
+    async def _prepare_voice_input(self, attachments, *, transcribe, keep_untranscribed=False):
         remaining = []
         transcripts = []
         had_audio = False
@@ -35,6 +34,8 @@ class PrototypeVoice:
                 continue
             transcript = (await transcribe(attachment, local_path, display_name) or "").strip()
             if not transcript:
+                if keep_untranscribed:
+                    remaining.append(attachment)
                 continue
             if audio_count > 1:
                 transcripts.append("[voice message: %s]\n%s" % (display_name, transcript))
@@ -59,7 +60,6 @@ class PrototypeVoice:
         chat_id,
         acct_id,
         audio_bytes,
-        delivery_method,
         content_type="",
         name="voice",
         platform="",
@@ -67,9 +67,14 @@ class PrototypeVoice:
     ):
         if not audio_bytes:
             return
-        att_type = voice_delivery_attachment_type(delivery_method)
-        suffix = voice_delivery_suffix(delivery_method)
-        mime = voice_delivery_mime(delivery_method, content_type)
+        if not is_ogg_opus_audio(audio_bytes, content_type):
+            converted = transcode_audio_to_ogg_opus(audio_bytes)
+            if converted:
+                audio_bytes = converted
+                content_type = "audio/ogg"
+        att_type = "voice"
+        suffix = ".ogg"
+        mime = "audio/ogg" if is_ogg_opus_audio(audio_bytes, content_type) else (content_type or "audio/ogg")
         meta = self.save_temp(
             data=audio_bytes,
             original_name="%s%s" % (name, suffix),
@@ -81,8 +86,7 @@ class PrototypeVoice:
             chat_id=chat_id,
             acct_id=acct_id,
             platform=platform,
-            chat_type=chat_type,
-        )
+            chat_type=chat_type)
 
     async def _send_text_and_maybe_voice(
         self,
@@ -100,8 +104,7 @@ class PrototypeVoice:
             chat_id=chat_id,
             acct_id=acct_id,
             platform=platform,
-            chat_type=chat_type,
-        )
+            chat_type=chat_type)
         if not include_voice:
             return
         try:

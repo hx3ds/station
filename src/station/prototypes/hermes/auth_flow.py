@@ -7,6 +7,7 @@ from station.errors import ExternalError
 from station.prototypes.boundary import ext_dict, ext_str
 from station.prototypes.device_auth import PrototypeDeviceAuth, format_device_login_start, local_llm_auth_reply
 
+from station.prototypes.model_config import SECRET_DELETE_HINT
 from .config import DEVICE_CODE_PROVIDERS, XAI_PROVIDERS, hermes_home_path
 
 CLOUD_API_ENV_KEYS = (
@@ -130,8 +131,9 @@ class HermesAuthFlow(PrototypeDeviceAuth):
         lines.extend(
             [
                 "",
-                "Choose a provider to sign in.",
-                "Commands: /login · /logout",
+                "Choose a provider to sign in, or send /key <api_key>.",
+                "Commands: /login · /logout · /key · /model · /provider",
+                SECRET_DELETE_HINT,
             ]
         )
         return "\n".join(lines)
@@ -165,8 +167,7 @@ class HermesAuthFlow(PrototypeDeviceAuth):
             reply_to=reply_to,
             platform=platform,
             chat_type=chat_type,
-            keyboard=self._login_picker_keyboard(),
-        )
+            keyboard=self._login_picker_keyboard())
 
     async def _handle_auth_command(self, *, cmd, args="", chat_id, acct_id, reply_to=None, platform="", chat_type=""):
         settings = self._launch_settings()
@@ -183,8 +184,7 @@ class HermesAuthFlow(PrototypeDeviceAuth):
                 acct_id=acct_id,
                 reply_to=reply_to,
                 platform=platform,
-                chat_type=chat_type,
-            )
+                chat_type=chat_type)
             return
         if cmd == "/logout":
             await self._logout(
@@ -246,8 +246,7 @@ class HermesAuthFlow(PrototypeDeviceAuth):
             acct_id=acct_id,
             reply_to=reply_to,
             platform=platform,
-            chat_type=chat_type,
-        )
+            chat_type=chat_type)
 
     async def _ensure_provider_auth(self, *, acct_id, chat_id, text="", reply_to=None, platform="", chat_type=""):
         if await self._provider_is_ready():
@@ -290,8 +289,7 @@ class HermesAuthFlow(PrototypeDeviceAuth):
             acct_id=acct_id,
             reply_to=reply_to,
             platform=platform,
-            chat_type=chat_type,
-        )
+            chat_type=chat_type)
 
     async def _run_device_login_op(self, op, option, pending=None):
         gateway = await self._ensure_gateway()
@@ -339,8 +337,7 @@ class HermesAuthFlow(PrototypeDeviceAuth):
                     acct_id=acct_id,
                     reply_to=reply_to,
                     platform=platform,
-                    chat_type=chat_type,
-                )
+                    chat_type=chat_type)
 
         def start_message(pending):
             return format_device_login_start(

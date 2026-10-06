@@ -2,6 +2,7 @@ import asyncio
 from dataclasses import dataclass, field
 
 from station import logger
+from station.prototypes.model_config import CONFIG_POLICY_HINT, SECRET_DELETE_HINT
 
 
 @dataclass(slots=True)
@@ -135,8 +136,7 @@ class PrototypeDeviceAuth:
                     acct_id=acct_id,
                     reply_to=reply_to,
                     platform=platform,
-                    chat_type=chat_type,
-                )
+                    chat_type=chat_type)
             return
 
         state = await self._get_auth_state(acct_id)
@@ -147,7 +147,7 @@ class PrototypeDeviceAuth:
         await on_success(result)
 
 
-def format_device_login_start(*, title, verification_uri, user_code, verification_uri_complete="", commands="/login · /logout"):
+def format_device_login_start(*, title, verification_uri, user_code, verification_uri_complete="", commands="/help · /login · /logout · /settings · /key"):
     lines = [
         title,
         "Open %s on any device and enter code: %s" % (verification_uri, user_code),
@@ -159,6 +159,9 @@ def format_device_login_start(*, title, verification_uri, user_code, verificatio
             "",
             "Waiting for authorization...",
             "Commands: %s" % commands,
+            "Or send /key <api_key> as a message.",
+            CONFIG_POLICY_HINT,
+            SECRET_DELETE_HINT,
         ]
     )
     return "\n".join(lines)
@@ -169,5 +172,5 @@ def local_llm_auth_reply(product, *, logout, base_url, provider, model):
         return "%s local LLM uses an API key. There is no cloud session to sign out of." % product
     return (
         "%s is using a local LLM at %s (provider %s, model %s). No cloud login is required."
-        % (product, base_url or "LOCAL_LLM_BASE_URL", provider, model)
+        % (product, base_url or "local LLM", provider, model)
     )

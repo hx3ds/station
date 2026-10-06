@@ -37,7 +37,6 @@ class PrototypeEcho:
             attachments=attachments if echo_file else None,
             reply_to=reply_to,
             chat_id=chat_id,
-            request_id=request_id if request_id else None,
             acct_id=acct_id,
             platform=fields["platform"],
             chat_type=fields["chat_type"],

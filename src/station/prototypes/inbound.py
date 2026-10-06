@@ -35,6 +35,14 @@ class InboundMessageContext:
     def chat_type(self):
         return self.fields["chat_type"]
 
+    @property
+    def user_id(self):
+        return self.fields["user_id"]
+
+    @property
+    def sender(self):
+        return self.fields["sender"]
+
 _INBOUND_RETRY_BASE_SECONDS = 0.25
 _INBOUND_RETRY_MAX_SECONDS = 30.0
 _INBOUND_RETRY_MAX_ATTEMPTS = 32
@@ -153,7 +161,6 @@ class PrototypeInbound:
             text=_QUEUE_FULL_REPLY,
             chat_id=chat_id,
             acct_id=acct_id,
-            request_id=request_id,
             platform=(data.get("platform") or ""),
             chat_type=(data.get("chat_type") or ""),
         )

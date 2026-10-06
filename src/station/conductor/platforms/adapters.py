@@ -5,6 +5,7 @@ from aiohttp import web
 
 from station.api.http import read_json_object
 from station.conductor.crypto import decrypt_if_encrypted
+from station.conductor.platforms.guidance import prepare_matrix_media_caption, prepare_outbound_caption
 from station.conductor.platforms.policy import media_ref_action
 from station.conductor.platforms.base import LocalPlatformAdapter
 from station.conductor.platforms.discord import DiscordIO
@@ -45,6 +46,7 @@ def _http_url_from_payload(payload: dict) -> str:
 
 class TelegramAdapter(LocalPlatformAdapter):
     acct_type = "telegram"
+    checks_group_message_settings = True
     capabilities = frozenset({"send_typing", "download_file", "send_message", "send_media", "handle_webhook"})
 
     def __init__(self, conductor) -> None:
@@ -74,6 +76,9 @@ class TelegramAdapter(LocalPlatformAdapter):
             reply_to=reply_to,
             keyboard=keyboard,
         )
+
+    async def group_message_notice(self, *, acct, token, chat_id) -> str:
+        return await self.io.group_message_notice(token=token)
 
     async def send_media(
         self,
@@ -150,6 +155,7 @@ class TelegramAdapter(LocalPlatformAdapter):
 
 class DiscordAdapter(LocalPlatformAdapter):
     acct_type = "discord"
+    checks_group_message_settings = True
     capabilities = frozenset(
         {"send_typing", "download_file", "send_message", "send_media", "send_discord_voice"}
     )
@@ -185,6 +191,9 @@ class DiscordAdapter(LocalPlatformAdapter):
             keyboard=keyboard,
         )
 
+    async def group_message_notice(self, *, acct, token, chat_id) -> str:
+        return await self.io.group_message_notice(token=token)
+
     async def send_media(
         self,
         *,
@@ -207,7 +216,7 @@ class DiscordAdapter(LocalPlatformAdapter):
         return await self.io.send_message(
             token=token,
             channel_id=chat_id,
-            content=caption,
+            content=prepare_outbound_caption("discord", caption or ""),
             file_bytes=bytes_to_send,
             filename=(payload.get("file_name") or "file"),
             reply_to=reply_to,
@@ -321,7 +330,11 @@ class MatrixAdapter(LocalPlatformAdapter):
             ref = _media_ref_from_payload(payload)
             if media_ref_action("matrix", ref) != "reuse":
                 return False
-            msg_content: dict[str, Any] = {"msgtype": msgtype, "body": caption or name, "url": ref}
+            body, html = prepare_matrix_media_caption(caption or "", name)
+            msg_content: dict[str, Any] = {"msgtype": msgtype, "body": body, "url": ref}
+            if html:
+                msg_content["format"] = "org.matrix.custom.html"
+                msg_content["formatted_body"] = html
             if method == "send_voice":
                 msg_content["org.matrix.msc3245.voice"] = {}
             if reply_to:
@@ -343,7 +356,7 @@ class MatrixAdapter(LocalPlatformAdapter):
             file_bytes=file_bytes,
             filename=name,
             content_type=(payload.get("content_type") or "") or None,
-            caption=caption or name,
+            caption=caption or "",
             is_voice=method == "send_voice",
             reply_to=reply_to,
         )
@@ -374,6 +387,7 @@ class MatrixAdapter(LocalPlatformAdapter):
 
 class QQAdapter(LocalPlatformAdapter):
     acct_type = "qq"
+    checks_group_message_settings = True
     capabilities = frozenset({"send_typing", "download_file", "send_message", "send_media"})
 
     def __init__(self, conductor) -> None:
@@ -409,6 +423,9 @@ class QQAdapter(LocalPlatformAdapter):
             acct_id=acct.get("acct_id") or "",
             server=_plaintext_server(self.conductor, acct) or None,
         )
+
+    async def group_message_notice(self, *, acct, token, chat_id) -> str:
+        return await self.io.group_message_notice(token=token, chat_id=chat_id)
 
     async def send_media(
         self,

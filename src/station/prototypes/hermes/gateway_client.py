@@ -58,8 +58,10 @@ class HermesGatewayProcess(JsonLineRpcProcess):
         self._stderr_task = asyncio.create_task(self._read_stderr_lines(label="hermes-agent stderr"), name="hermes-stderr")
         await asyncio.wait_for(self._ready.wait(), timeout=timeout_s)
 
-    async def session_create(self):
+    def _session_params(self, extra=None):
         params = {"cwd": self.settings.workspace_dir, "source": "station"}
+        if extra:
+            params.update(extra)
         provider = self.settings.gateway_provider()
         model = self.settings.model
         if model:
@@ -76,12 +78,45 @@ class HermesGatewayProcess(JsonLineRpcProcess):
             params["reasoning_effort"] = "none"
         if self.settings.fast:
             params["fast"] = True
+        return params
 
-        result = ext_dict("session.create result", await self.request("session.create", params))
+    async def session_create(self, *, title=""):
+        extra = {}
+        if title:
+            extra["title"] = title
+        result = ext_dict("session.create result", await self.request("session.create", self._session_params(extra)))
         session_id = ext_str("session.create session_id", result.get("session_id"))
         if not session_id:
             raise RuntimeError("Hermes session.create did not return a session_id")
+        self._events.queue(session_id)
         return session_id
+
+    async def session_resume(self, session_id):
+        session_id = ext_str("session.resume session_id", session_id)
+        if not session_id:
+            return ""
+        try:
+            result = ext_dict(
+                "session.resume result",
+                await self.request(
+                    "session.resume",
+                    {"session_id": session_id, "omit_messages": True},
+                ),
+            )
+        except RuntimeError as e:
+            logger.info("Hermes session.resume failed session_id=%s error=%s", session_id, e)
+            return ""
+        resumed = ext_str("session.resume session_id", result.get("session_id"))
+        if not resumed:
+            resumed = session_id
+        self._events.queue(resumed)
+        return resumed
+
+    async def interrupt_session(self, *, session_id):
+        session_id = ext_str("session.interrupt session_id", session_id)
+        if not session_id:
+            return
+        await self.request("session.interrupt", {"session_id": session_id})
 
     async def submit_prompt(self, *, session_id, text):
         self._events.queue(session_id)

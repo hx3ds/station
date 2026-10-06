@@ -50,7 +50,7 @@ def apply_reply_quote(text: str, reply_to: str):
             snippet = f"{author_id}: {snippet}"
         elif author_id:
             snippet = author_id
-        reply_to_text = guidance.reply_snippet(snippet)
+        reply_to_text = guidance.telegram_reply_snippet(snippet)
         out = guidance.inject_reply_context(out, reply_to_text)
         return out, reply_to_text
     return out, ""

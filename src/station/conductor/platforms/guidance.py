@@ -256,6 +256,37 @@ def strip_markdown_v2(text: str) -> str:
     cleaned = re.sub(r"\|\|([^|]+)\|\|", r"\1", cleaned)
     return cleaned
 
+KIND_TEXT = "text"
+KIND_MARKDOWN = "markdown"
+KIND_MARKDOWN_V2 = "markdownV2"
+
+_CLASSIFY_FENCE_RE = re.compile(r"```.*?```", re.DOTALL)
+_CLASSIFY_INLINE_RE = re.compile(r"`[^`\n]*`")
+_CLASSIFY_HTML_RE = re.compile(r"<[a-zA-Z/][^>]*>")
+_CLASSIFY_MDV2_PUNCT_RE = re.compile(r"\\[.!]")
+_CLASSIFY_COMMONMARK_EXCL_RE = re.compile(r"\*\*|~~|^#{1,6}\s", re.MULTILINE)
+_CLASSIFY_MARKDOWN_RE = re.compile(
+    r"\*\*|~~|^#{1,6}\s|\[[^\]]+\]\([^)]+\)|\|\|[^|]+\|\||^\s*\|.+\|\s*$|(?:^|[^\w\\])\*[^*\n]+\*(?:[^\w]|$)",
+    re.MULTILINE,
+)
+
+def classify_outbound(text: str) -> str:
+    if not (text or "").strip():
+        return KIND_TEXT
+    prose = _CLASSIFY_FENCE_RE.sub(" ", ensure_closed_code_fences(text))
+    prose = _CLASSIFY_INLINE_RE.sub(" ", prose)
+    if _CLASSIFY_HTML_RE.search(prose):
+        return KIND_TEXT
+    if _CLASSIFY_MDV2_PUNCT_RE.search(prose) and not _CLASSIFY_COMMONMARK_EXCL_RE.search(prose):
+        return KIND_MARKDOWN_V2
+    if _CLASSIFY_MARKDOWN_RE.search(prose):
+        return KIND_MARKDOWN
+    return KIND_TEXT
+
+def uses_telegram_parse_mode(text: str) -> bool:
+    kind = classify_outbound(text)
+    return kind == KIND_MARKDOWN or kind == KIND_MARKDOWN_V2
+
 def separate_chunk_indicator_from_fence(text: str) -> str:
     return _CHUNK_INDICATOR_ON_FENCE_RE.sub(r"```\n\g<indicator>", text)
 
@@ -516,8 +547,28 @@ def format_qq_message(content: str) -> str:
         return content
     return strip_markdown(content)
 
+def prepare_matrix_media_caption(caption: str, fallback: str = "") -> tuple[str, str]:
+    cap = (caption or "").strip()
+    if not cap:
+        return fallback, ""
+    body = prepare_outbound_caption("matrix", cap)
+    if not body:
+        return fallback, ""
+    html = matrix_html(body)
+    if not html or html == body:
+        return body, ""
+    return body, html
+
+
 def format_outbound_text(platform: str, text: str) -> str:
     p = (platform or "").strip().lower()
+    kind = classify_outbound(text)
+    if kind == KIND_MARKDOWN_V2:
+        if p == "telegram":
+            return text
+        return strip_markdown_v2(text)
+    if kind != KIND_MARKDOWN:
+        return text
     if p == "telegram":
         return format_telegram_markdown_v2(text)
     if p in ("whatsapp", "whatsapp_cloud"):
@@ -544,6 +595,7 @@ def ensure_closed_code_fences(text: str) -> str:
 
 def prepare_outbound_text(platform: str, text: str) -> list[str]:
     text = ensure_closed_code_fences(text or "")
+    kind = classify_outbound(text)
     formatted = format_outbound_text(platform, text)
     if not formatted:
         return []
@@ -566,7 +618,7 @@ def prepare_outbound_text(platform: str, text: str) -> list[str]:
             else:
                 last = truncate_to_limit(last, max(1, max_len - len_fn(note)), len_fn) + note
         chunks = kept + [last]
-    if p == "telegram":
+    if p == "telegram" and kind != KIND_TEXT:
         chunks = [separate_chunk_indicator_from_fence(c) for c in chunks]
         if len(chunks) > 1:
             chunks = [escape_telegram_chunk_index(c) for c in chunks]
@@ -703,15 +755,6 @@ def telegram_reply_snippet(text: str) -> str:
         return text
     return text[:_TELEGRAM_REPLY_SNIPPET_MAX]
 
-def inject_telegram_reply_context(message_text: str, reply_snippet: str) -> str:
-    return inject_reply_context(message_text, reply_snippet)
-
-def format_telegram_reaction_text(emojis=None, custom_emoji_ids=None) -> str:
-    return format_reaction_text(emojis, custom_emoji_ids)
-
-def reply_snippet(text: str) -> str:
-    return telegram_reply_snippet(text)
-
 def inject_reply_context(message_text: str, reply_snippet: str) -> str:
     snippet = telegram_reply_snippet(reply_snippet)
     if not snippet:
@@ -813,12 +856,10 @@ _TELEGRAM_VOICE_EXTS = frozenset({".ogg", ".opus"})
 def resolve_telegram_media_method(method, filename=""):
     method = (method or "").strip()
     ext = os.path.splitext((filename or "").strip().lower())[1]
-    if method not in ("send_audio", "send_voice"):
+    if method == "send_voice":
+        return "send_voice"
+    if method != "send_audio":
         return method
-    if ext in _TELEGRAM_VOICE_EXTS:
-        if method == "send_voice":
-            return "send_voice"
-        return "send_document"
     if ext in _TELEGRAM_AUDIO_EXTS:
         return "send_audio"
     if ext in _AUDIO_EXTS:

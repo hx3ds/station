@@ -1,9 +1,9 @@
 import asyncio
-import os
+import shutil
 from pathlib import Path
 
 from station import logger
-from station.prototypes.boundary import ext_dict, ext_str
+from station.prototypes.launch_settings import child_process_env
 from station.prototypes.fs_paths import sanitize_path_component
 from station.prototypes.gateway_process import gateway_subprocess_kwargs
 from station.prototypes.jsonrpc_process import JsonLineRpcProcess
@@ -29,8 +29,7 @@ class PiRpcProcess(JsonLineRpcProcess):
         self.settings.agent_home.mkdir(parents=True, exist_ok=True)
         Path(self.settings.workspace_dir).expanduser().mkdir(parents=True, exist_ok=True)
 
-        env = os.environ.copy()
-        env.update(self.settings.extra_env)
+        env = child_process_env(self.settings.extra_env)
         env.setdefault("PI_CODING_AGENT_DIR", str(self.settings.agent_home))
         env.setdefault("PI_CODING_AGENT_SESSION_DIR", str(self.session_dir))
 
@@ -177,3 +176,22 @@ class PiGatewayProcess:
 
     def get_chat(self, *, acct_id, chat_id):
         return self._chats.get("%s:%s" % (acct_id, chat_id))
+
+    async def drop_chat(self, *, acct_id, chat_id):
+        key = "%s:%s" % (acct_id, chat_id)
+        async with self._lock:
+            process = self._chats.pop(key, None)
+            if process is not None and self.proc is process.proc:
+                leftover = next(iter(self._chats.values()), None)
+                self.proc = leftover.proc if leftover is not None else None
+        session_dir = (
+            process.session_dir
+            if process is not None
+            else self.settings.session_root
+            / sanitize_path_component(acct_id)
+            / sanitize_path_component(chat_id)
+        )
+        if process is not None:
+            await process.close()
+        if session_dir.exists():
+            shutil.rmtree(session_dir, ignore_errors=True)

@@ -7,3 +7,4 @@ mautrix[encryption]
 discord.py
 PyNaCl
 audioop-lts; python_version >= "3.13"
+cursor-sdk

@@ -114,26 +114,6 @@ async def _build_headers(ctx, token):
     await _maybe_add_prototype_version_header(ctx, headers)
     return headers
 
-async def _get_prototype_type(ctx):
-    cached = ctx.prototype_type
-    if cached is None:
-        cached = ""
-    cached = cached.strip().lower()
-    if cached:
-        return cached
-    if ctx.db and ctx.prototype_id:
-        stored = await ctx.db.get_prototype_info(ctx.prototype_id)
-        if stored is None:
-            return ""
-        prototype_type = stored.get("type")
-        if prototype_type is None:
-            return ""
-        prototype_type = ext_str("type", prototype_type, default="").lower()
-        if prototype_type:
-            ctx.prototype_type = prototype_type
-            return prototype_type
-    return ""
-
 def _local_tenant(ctx):
     if ctx.app is None or ctx.prototype_id is None:
         return None
@@ -204,10 +184,8 @@ async def _invoke_local(
     method,
     params,
     files,
-    request_id,
     chat_id,
     acct_id,
-    use_gateway,
 ):
     lc = _local_conductor(ctx)
     if lc is None:
@@ -217,11 +195,9 @@ async def _invoke_local(
         prototype_id=ctx.prototype_id,
         model_id=model_id,
         chat_id=chat_id,
-        request_id=request_id,
         acct_id=acct_id,
         params=params,
         files=files,
-        use_gateway=use_gateway,
     )
 
 def _prepare_request_data(payload, files, method=None):
@@ -258,19 +234,12 @@ def _build_conductor_url(
     prototype_id,
     model_id,
     chat_id=None,
-    request_id=None,
     acct_id=None,
-    use_gateway=False,
 ):
-    if method in _SUPPORTED_GATEWAY_METHODS or use_gateway:
-        if not acct_id:
-            return None
-        chat_id_str = chat_id if chat_id else "0"
-        return "%s/gateway/%s/%s/%s/%s/%s" % (conductor_url, method, chat_id_str, prototype_id, model_id, acct_id)
-
-    if chat_id is None or not request_id:
+    if not acct_id:
         return None
-    return "%s/reply/%s/%s/%s/%s/%s" % (conductor_url, method, chat_id, request_id, prototype_id, model_id)
+    chat_id_str = chat_id if chat_id else "0"
+    return "%s/gateway/%s/%s/%s/%s/%s" % (conductor_url, method, chat_id_str, prototype_id, model_id, acct_id)
 
 async def _conductor_proxy(
     ctx,
@@ -280,7 +249,6 @@ async def _conductor_proxy(
     method,
     params,
     files,
-    request_id,
     chat_id,
     acct_id,
 ):
@@ -289,7 +257,6 @@ async def _conductor_proxy(
 
     if not ctx.prototype_version:
         await _sync_prototype_from_consul(ctx)
-    use_gateway = (await _get_prototype_type(ctx)) == "subscription" or method in _SUPPORTED_GATEWAY_METHODS
 
     local_result = await _invoke_local(
         ctx,
@@ -297,10 +264,8 @@ async def _conductor_proxy(
         method=method,
         params=params,
         files=files,
-        request_id=request_id,
         chat_id=chat_id,
         acct_id=acct_id,
-        use_gateway=use_gateway,
     )
     if local_result is not None:
         return bool(local_result)
@@ -321,16 +286,12 @@ async def _conductor_proxy(
             prototype_id=prototype_id,
             model_id=model_id,
             chat_id=chat_id,
-            request_id=request_id,
             acct_id=acct_id,
-            use_gateway=use_gateway,
         )
         if not url:
             return False
 
         body = dict(params or {})
-        if not use_gateway and method not in _SUPPORTED_GATEWAY_METHODS and acct_id:
-            body["acct_id"] = acct_id
         request_kwargs, opened_files = _prepare_request_data(body, files, method)
         try:
             if ctx.prototype_version:
@@ -341,11 +302,17 @@ async def _conductor_proxy(
             async def _post():
                 async with ctx.session.post(url, headers=headers, **request_kwargs) as response:
                     status = response.status
-                    if is_transient_status(status):
-                        raise RetryableError("status=%s" % status)
                     body = None
-                    if status in (490, 491):
-                        body = await response.json(content_type=None)
+                    if status in (490, 491) or status >= 400:
+                        try:
+                            body = await response.json(content_type=None)
+                        except (aiohttp.ContentTypeError, json.JSONDecodeError, ValueError):
+                            body = None
+                    retry = is_transient_status(status)
+                    if isinstance(body, dict) and body.get("retry") is True:
+                        retry = True
+                    if retry:
+                        raise RetryableError("status=%s" % status)
                     return status, body
 
             try:
@@ -385,11 +352,9 @@ async def send_proxy(
     method="send_message",
     params=None,
     files=None,
-    request_id=None,
     chat_id=None,
     acct_id=None,
-    **kwargs,
-):
+    **kwargs):
     if params is None:
         params = {}
     params = dict(params)
@@ -407,7 +372,6 @@ async def send_proxy(
             method=method,
             params=params,
             files=files,
-            request_id=request_id,
             chat_id=chat_id,
             acct_id=acct_id,
         )
@@ -419,7 +383,6 @@ async def send_proxy(
             method=method,
             params=params,
             files=files,
-            request_id=request_id,
             chat_id=chat_id,
             acct_id=acct_id,
         )
@@ -503,10 +466,8 @@ async def download_file(ctx, *, model_id=None, token=None, chat_id=None, file_id
         method="download_file",
         params={"file_id": file_id},
         files=None,
-        request_id=None,
         chat_id=chat_id,
         acct_id=acct_id,
-        use_gateway=True,
     )
     if local_result is not None:
         if local_result is False:
@@ -551,7 +512,7 @@ async def _ensure_path(proto, file_id):
         return None
     return proto.resolve_file_id(file_id)
 
-async def _send_step(proto, step, *, chat_id, request_id, acct_id):
+async def _send_step(proto, step, *, chat_id, acct_id):
     raw_params = step.get("params")
     params = dict(raw_params) if raw_params is not None else {}
     files = step.get("files")
@@ -571,11 +532,9 @@ async def _send_step(proto, step, *, chat_id, request_id, acct_id):
     ok = await proto.send_proxy(
         method=method,
         chat_id=chat_id,
-        request_id=request_id,
         params=params,
         files=files,
-        acct_id=acct_id,
-    )
+        acct_id=acct_id)
     if ok or not reused or not download:
         return ok
     path = await _ensure_path(proto, download)
@@ -588,11 +547,9 @@ async def _send_step(proto, step, *, chat_id, request_id, acct_id):
     return await proto.send_proxy(
         method=method,
         chat_id=chat_id,
-        request_id=request_id,
         params=retry,
         files={field if field is not None else "document": path},
-        acct_id=acct_id,
-    )
+        acct_id=acct_id)
 
 async def send_outbound(
     proto,
@@ -602,11 +559,9 @@ async def send_outbound(
     reply_to=None,
     chat_id=None,
     acct_id=None,
-    request_id=None,
     platform="",
     chat_type="",
-    keyboard=None,
-):
+    keyboard=None):
     if not proto.client_context:
         return False
     if platform is None:
@@ -636,7 +591,6 @@ async def send_outbound(
             proto,
             step,
             chat_id=chat_id,
-            request_id=request_id,
             acct_id=acct_id,
         )
         if not sent:

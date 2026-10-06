@@ -15,7 +15,7 @@ from station.conductor.crypto import decrypt_if_encrypted
 from station.conductor.platforms.base import LocalPlatformAdapter
 from station.conductor.platforms import guidance
 from station.conductor.platforms.policy import media_ref_action
-from station.conductor.util import constant_time_equal, err, ext_str, ext_id, ext_int, catch_external
+from station.conductor.util import apply_sender, constant_time_equal, err, ext_str, ext_id, ext_int, catch_external
 from station import logger
 from station.errors import ExternalError
 from station.prototypes.boundary import ext_dict, ext_float, ext_list
@@ -490,6 +490,7 @@ class WhatsAppCloudIO:
             return None
         group_id = ext_id(raw_message.get("group_id"), "group_id").strip()
         chat_id = group_id or sender_id
+        chat_type = "group" if group_id else "private"
         wamid = ext_id(raw_message.get("id"), "id").strip()
         text = ""
         caption = ""
@@ -606,6 +607,7 @@ class WhatsAppCloudIO:
             return {
                 "msg_id": f"reaction:{wamid}",
                 "chat_id": chat_id,
+                "chat_type": chat_type,
                 "carrier_user_id": sender_id,
                 "text": text,
                 "caption": "",
@@ -640,6 +642,7 @@ class WhatsAppCloudIO:
         return {
             "msg_id": wamid,
             "chat_id": chat_id,
+            "chat_type": chat_type,
             "carrier_user_id": sender_id,
             "text": text,
             "caption": caption,
@@ -734,8 +737,10 @@ class WhatsAppCloudIO:
                         "msg_id": parsed["msg_id"],
                         "platform": "whatsapp_cloud",
                         "chat_id": parsed["chat_id"],
+                        "chat_type": parsed["chat_type"],
                         "user_id": parsed["carrier_user_id"],
                     }
+                    apply_sender(body, name=ext_str(parsed.get("sender_name"), "sender_name"))
                     if parsed.get("reply_to"):
                         body["reply_to"] = parsed["reply_to"]
                     if parsed.get("reply_to_text"):

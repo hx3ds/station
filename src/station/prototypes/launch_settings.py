@@ -1,10 +1,9 @@
 import os
-import shlex
 from urllib.parse import urlparse
 
 from station.config.config import load_optional_toml, merge_nested
 from station.prototypes.boundary import ext_list, ext_mapping_get, ext_require, parse_env_int
-from station.prototypes.voice_policy import parse_voice_delivery_method, parse_voice_reply_mode
+from station.prototypes.voice_policy import parse_voice_reply_mode
 
 LOCAL_LLM_PROVIDERS = {
     "custom",
@@ -32,6 +31,13 @@ PROVIDER_ENV_KEYS = {
     "gemini_api_key": "GEMINI_API_KEY",
     "local_llm_api_key": "LOCAL_LLM_API_KEY",
     "local_llm_base_url": "LOCAL_LLM_BASE_URL",
+}
+
+PROVIDER_CHILD_ENV = frozenset(PROVIDER_ENV_KEYS.values()) | {
+    "CURSOR_API_KEY",
+    "GROK_API_KEY",
+    "DS_API_KEY",
+    "DS_BASE_URL",
 }
 
 _PROXY_ENV_KEYS = (
@@ -67,6 +73,20 @@ def apply_local_provider_env(env, *, base_url=""):
     return cleaned
 
 
+def bypass_loopback_proxy(env=None):
+    target = os.environ if env is None else env
+    hosts = ["127.0.0.1", "localhost", "::1"]
+    existing = target.get("NO_PROXY") or target.get("no_proxy") or ""
+    parts = [item.strip() for item in existing.split(",") if item.strip()]
+    for host in hosts:
+        if host not in parts:
+            parts.append(host)
+    no_proxy = ",".join(parts)
+    target["NO_PROXY"] = no_proxy
+    target["no_proxy"] = no_proxy
+    return target
+
+
 def normalize_openai_base_url(url):
     text = (url or "").strip().rstrip("/")
     if not text:
@@ -75,29 +95,63 @@ def normalize_openai_base_url(url):
         return text
     return text + "/v1"
 
-def merge_launch_settings(model_settings, *, config_file=None):
+def _empty_setting(value):
+    if value is None:
+        return True
+    if type(value) is str:
+        return not value.strip()
+    if type(value) is dict:
+        return not value
+    return False
+
+def merge_fill(base, extra):
+    out = dict(base)
+    if not extra:
+        return out
+    for key, value in extra.items():
+        if value is None:
+            continue
+        if type(value) is str and not value.strip():
+            continue
+        existing = out.get(key)
+        if type(value) is dict:
+            if type(existing) is dict:
+                out[key] = merge_fill(existing, value)
+            elif _empty_setting(existing):
+                out[key] = merge_fill({}, value)
+            continue
+        if _empty_setting(existing):
+            out[key] = value
+    return out
+
+def merge_launch_settings(model_settings, *, config_file=None, secret_file=None, overlay=None):
     ext_require("model_settings", model_settings, (dict,))
-    return merge_nested(load_optional_toml(config_file, "prototype config file"), model_settings)
+    raw = load_optional_toml(config_file, "prototype config file")
+    if secret_file:
+        raw = merge_nested(raw, load_optional_toml(secret_file, "prototype secret file"))
+    if model_settings:
+        raw = merge_fill(raw, model_settings)
+    if overlay:
+        ext_require("model overlay", overlay, (dict,))
+        raw = merge_nested(raw, overlay)
+    return raw
 
-def collect_env_section(env_section):
-    extra_env = {}
-    for env_key, env_value in env_section.items():
-        ext_require("env.%s" % env_key, env_value, (str,))
-        if env_key.strip() and env_value.strip():
-            extra_env[env_key.strip()] = env_value
-    return extra_env
+def child_process_env(extra_env=None, *, base=None):
+    env = dict(os.environ if base is None else base)
+    for key in PROVIDER_CHILD_ENV:
+        env.pop(key, None)
+    if extra_env:
+        env.update(extra_env)
+    return env
 
-def voice_settings_from_mapping(voice, *, reply_mode_default="", delivery_method_default="voice"):
-    return (
-        parse_voice_reply_mode(ext_mapping_get(voice, "reply_mode", (str,), reply_mode_default)),
-        parse_voice_delivery_method(
-            ext_mapping_get(voice, "delivery_method", (str,), delivery_method_default),
-            default=delivery_method_default or "voice",
-        ),
-    )
+def extra_env_has_provider_key(extra_env):
+    for key in PROVIDER_ENV_KEYS.values():
+        if (extra_env.get(key) or "").strip():
+            return True
+    return False
 
-def env_str(name):
-    return os.getenv(name, "").strip()
+def voice_settings_from_mapping(voice, *, reply_mode_default=""):
+    return parse_voice_reply_mode(ext_mapping_get(voice, "reply_mode", (str,), reply_mode_default))
 
 def env_int(name, default=0):
     raw = os.getenv(name)
@@ -106,13 +160,8 @@ def env_int(name, default=0):
     return parse_env_int(name, raw)
 
 def parse_command_args(value, label):
-
     if value is None:
         return []
-    if type(value) is str:
-        if not value.strip():
-            return []
-        return shlex.split(value)
     items = ext_list(label, value)
     args = []
     for item in items:
@@ -121,8 +170,8 @@ def parse_command_args(value, label):
             args.append(item.strip())
     return args
 
-def collect_provider_env(keys, env_section, *, env_keys=None):
-    extra_env = collect_env_section(env_section)
+def collect_provider_env(keys, *, env_keys=None):
+    extra_env = {}
     mapping = env_keys if env_keys is not None else PROVIDER_ENV_KEYS
     for source_key, target_key in mapping.items():
         value = ext_mapping_get(keys, source_key, (str,), "")
@@ -151,13 +200,11 @@ def resolve_local_llm(*, model, keys, local_llm, extra_env, provider, empty_prov
     base_url = normalize_openai_base_url(
         ext_mapping_get(local_llm, "base_url", (str,), "")
         or ext_mapping_get(model, "base_url", (str,), "")
-        or env_str("LOCAL_LLM_BASE_URL")
     )
     api_key = (
         ext_mapping_get(keys, "local_llm_api_key", (str,), "")
         or ext_mapping_get(local_llm, "api_key", (str,), "")
         or ext_mapping_get(model, "api_key", (str,), "")
-        or env_str("LOCAL_LLM_API_KEY")
     )
     if not (provider or "").strip() and base_url and empty_provider:
         provider = empty_provider
@@ -178,10 +225,7 @@ def resolve_local_llm(*, model, keys, local_llm, extra_env, provider, empty_prov
     )
 
 def first_existing_command(candidates):
-    for item in candidates:
-        if not item:
-            continue
-        command = [item] if type(item) is str else list(item)
+    for command in candidates:
         if not command:
             continue
         exe = command[0]

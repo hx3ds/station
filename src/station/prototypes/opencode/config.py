@@ -1,6 +1,5 @@
 import json
 import os
-import shlex
 import shutil
 from dataclasses import dataclass
 
@@ -9,8 +8,6 @@ from station.prototypes.fs_paths import write_atomic
 from station.prototypes.launch_settings import (
     LOCAL_LLM_PROVIDERS,
     collect_provider_env,
-    env_int,
-    env_str,
     launch_sections,
     merge_launch_settings,
     parse_command_args,
@@ -18,24 +15,9 @@ from station.prototypes.launch_settings import (
     resolve_local_llm,
     split_provider_model,
     uses_xai as provider_uses_xai,
+    voice_settings_from_mapping,
 )
-
-WORKSPACE_OVERRIDE_NAME = "opencode_workspace"
-
-PORT_ENV = "OPENCODE_BRIDGE_PORT"
-
-def _env_port():
-    return env_int(PORT_ENV, 0)
-
-def is_windows_interop_path(path):
-    normalized = path.replace("\\", "/").lower()
-    if normalized.endswith(".exe"):
-        return True
-    if normalized.startswith("/mnt/c/"):
-        return True
-    if "/nvm4w/" in normalized:
-        return True
-    return False
+from station.prototypes.workspace import is_windows_interop_path
 
 def _linux_opencode_candidates():
     home = os.path.expanduser("~")
@@ -56,14 +38,8 @@ def _usable_linux_opencode(path):
     return resolved
 
 def _resolve_opencode_command(server):
-    explicit = ext_mapping_get(server, "command", (str, list), None, allow_none=True)
-    if explicit is None or explicit == "" or explicit == []:
-        explicit = env_str("OPENCODE_BRIDGE_OPENCODE_COMMAND")
-        if explicit:
-            explicit = shlex.split(explicit)
-        else:
-            explicit = None
-    else:
+    explicit = ext_mapping_get(server, "command", (list,), None, allow_none=True)
+    if explicit:
         explicit = parse_command_args(explicit, "server.command")
 
     if explicit:
@@ -74,7 +50,7 @@ def _resolve_opencode_command(server):
             )
         return explicit
 
-    found = first_existing_command(path for path in _linux_opencode_candidates() if _usable_linux_opencode(path))
+    found = first_existing_command([[path] for path in _linux_opencode_candidates() if _usable_linux_opencode(path)])
     if found:
         return found
 
@@ -167,6 +143,9 @@ class OpenCodeLaunchSettings:
     local_llm_context_window: int
     local_llm_max_output: int
     opencode_overrides: dict
+    voice: dict
+    voice_reply_mode: str
+    base_url: str
 
     def uses_local_llm(self):
         if self.local_llm_base_url:
@@ -182,43 +161,40 @@ class OpenCodeLaunchSettings:
         return provider_uses_xai(self.provider, self.model, local_llm=self.uses_local_llm())
 
     @classmethod
-    def from_model_settings(cls, model_settings, *, default_workspace, config_file=None, workspace_override=None):
-        raw = merge_launch_settings(model_settings, config_file=config_file)
+    def from_model_settings(cls, model_settings, *, default_workspace, config_file=None, secret_file=None, workspace_override=None, overlay=None):
+        raw = merge_launch_settings(
+            model_settings,
+            config_file=config_file,
+            secret_file=secret_file,
+            overlay=overlay,
+        )
 
-        sections = launch_sections(raw, "model", "server", "workspace", "keys", "env", "local_llm", "opencode")
+        sections = launch_sections(raw, "model", "server", "workspace", "keys", "local_llm", "opencode", "voice")
         model = sections["model"]
         server = sections["server"]
         workspace = sections["workspace"]
         keys = sections["keys"]
-        env_section = sections["env"]
         local_llm = sections["local_llm"]
         opencode_overrides = sections["opencode"]
+        voice = sections["voice"]
+        voice_reply_mode = voice_settings_from_mapping(voice)
 
         workspace_dir = (
             (workspace_override.strip() if workspace_override else "")
             or ext_mapping_get(workspace, "dir", (str,), "")
-            or env_str("OPENCODE_BRIDGE_WORKSPACE")
             or default_workspace
         )
         workspace_path = os.path.expanduser(workspace_dir)
 
-        hostname = (
-            ext_mapping_get(server, "hostname", (str,), "")
-            or env_str("OPENCODE_BRIDGE_HOSTNAME")
-            or "127.0.0.1"
-        )
+        hostname = ext_mapping_get(server, "hostname", (str,), "") or "127.0.0.1"
         port = ext_mapping_get(server, "port", (int,), None, allow_none=True)
         if port is None:
-            port = _env_port()
+            port = 0
 
         serve_args = parse_command_args(
-            ext_mapping_get(server, "serve_args", (str, list), None, allow_none=True),
+            ext_mapping_get(server, "serve_args", (list,), None, allow_none=True),
             "server.serve_args",
         )
-        if not serve_args:
-            raw_args = env_str("OPENCODE_BRIDGE_SERVE_ARGS")
-            if raw_args:
-                serve_args = shlex.split(raw_args)
 
         provider, model_id = split_provider_model(
             ext_mapping_get(model, "model", (str,), ""),
@@ -229,7 +205,7 @@ class OpenCodeLaunchSettings:
         if not provider and model_id.lower().startswith("grok"):
             provider = "xai"
 
-        extra_env = collect_provider_env(keys, env_section)
+        extra_env = collect_provider_env(keys)
         (
             provider,
             local_llm_base_url,
@@ -252,8 +228,6 @@ class OpenCodeLaunchSettings:
             else (
                 ext_mapping_get(keys, "xai_api_key", (str,), "")
                 or ext_mapping_get(model, "api_key", (str,), "")
-                or env_str("XAI_API_KEY")
-                or env_str("GROK_API_KEY")
             )
         )
         if uses_local_llm:
@@ -272,15 +246,8 @@ class OpenCodeLaunchSettings:
             agent=ext_mapping_get(model, "agent", (str,), ""),
             variant=ext_mapping_get(model, "variant", (str,), ""),
             approvals_mode=ext_mapping_get(model, "approvals_mode", (str,), "always").lower(),
-            server_password=(
-                ext_mapping_get(server, "password", (str,), "")
-                or env_str("OPENCODE_SERVER_PASSWORD")
-            ),
-            server_username=(
-                ext_mapping_get(server, "username", (str,), "")
-                or env_str("OPENCODE_SERVER_USERNAME")
-                or "opencode"
-            ),
+            server_password=ext_mapping_get(server, "password", (str,), ""),
+            server_username=ext_mapping_get(server, "username", (str,), "") or "opencode",
             extra_env=extra_env,
             serve_args=serve_args,
             api_key=api_key,
@@ -289,6 +256,9 @@ class OpenCodeLaunchSettings:
             local_llm_context_window=local_llm_context_window,
             local_llm_max_output=local_llm_max_output,
             opencode_overrides=dict(opencode_overrides),
+            voice=dict(voice),
+            voice_reply_mode=voice_reply_mode,
+            base_url=local_llm_base_url,
         )
 
     def model_payload(self):
@@ -305,22 +275,3 @@ class OpenCodeLaunchSettings:
         if not self.model or not provider:
             return None
         return {"providerID": provider, "modelID": self.model}
-
-def workspace_override_path(storage_dir):
-    return os.path.join(storage_dir, WORKSPACE_OVERRIDE_NAME)
-
-def load_workspace_override(storage_dir):
-    path = workspace_override_path(storage_dir)
-    if not os.path.isfile(path):
-        return ""
-    with open(path, "r", encoding="utf-8") as f:
-        return f.read().strip()
-
-def save_workspace_override(storage_dir, workspace):
-    write_atomic(workspace_override_path(storage_dir), workspace.strip() + "\n")
-
-def clear_workspace_override(storage_dir):
-    try:
-        os.remove(workspace_override_path(storage_dir))
-    except FileNotFoundError:
-        pass

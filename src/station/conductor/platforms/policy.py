@@ -58,7 +58,7 @@ PLATFORMS = {
         "native_kinds": NATIVE_KINDS,
         "degrade": {"sticker": "photo"},
         "caption_with_media": True,
-        "media_chat_types": ("c2c", "group"),
+        "media_chat_types": ("private", "group"),
         "reply_to": True,
     },
     "whatsapp": {

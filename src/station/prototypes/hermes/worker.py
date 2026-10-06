@@ -5,13 +5,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from station import logger
-from station.prototypes.boundary import ext_bool, ext_mapping_get, ext_result_dict, ext_str
+from station.prototypes.boundary import ext_mapping_get, ext_result_dict, ext_str
 from station.prototypes.bridge_worker import ChatBridgeState, PrototypeBridgeWorker
+from station.prototypes.chat_history import load_session_id, save_session_id
+from station.prototypes.outbound_files import STATION_OUTBOUND_HINT
 from station.prototypes.voice import PrototypeVoice
-from station.prototypes.voice_policy import (
-    voice_delivery_mime,
-    voice_delivery_suffix,
-)
+
 
 
 USAGE_EXHAUSTED_REPLY = (
@@ -79,6 +78,7 @@ class HermesWorker(PrototypeVoice, PrototypeBridgeWorker):
         platform="",
         chat_type="",
         message_id=None,
+        user_id="",
     ):
         state = await self._get_chat_state(acct_id=acct_id, chat_id=chat_id)
         gateway = await self._ensure_gateway()
@@ -124,8 +124,7 @@ class HermesWorker(PrototypeVoice, PrototypeBridgeWorker):
             if not batch:
                 return
 
-            if not state.session_id:
-                state.session_id = await gateway.session_create()
+            await self._ensure_chat_session(gateway=gateway, state=state, acct_id=acct_id, chat_id=chat_id)
 
             await self._submit_batch(
                 gateway=gateway,
@@ -164,12 +163,49 @@ class HermesWorker(PrototypeVoice, PrototypeBridgeWorker):
         await gateway.submit_prompt(session_id=state.session_id, text=prompt)
         await self._drain_session_events(gateway=gateway, state=state, chat_id=chat_id, acct_id=acct_id)
 
+    def _chat_session_title(self, acct_id, chat_id):
+        return "station:%s:%s" % (acct_id, chat_id)
+
+    async def _drop_backend_session(self, *, session_id, chat_id, acct_id):
+        gateway = self._gateway
+        if gateway is None or not session_id:
+            return
+        try:
+            await gateway.interrupt_session(session_id=session_id)
+        except Exception:
+            logger.info(
+                "Hermes interrupt on restart failed model_id=%s acct_id=%s chat_id=%s",
+                self.model_id,
+                acct_id,
+                chat_id,
+                exc_info=True,
+            )
+
+    async def _ensure_chat_session(self, *, gateway, state, acct_id, chat_id):
+        if state.session_id:
+            return state.session_id
+        stored = load_session_id(self.storage_dir, acct_id, chat_id)
+        if stored:
+            resumed = await gateway.session_resume(stored)
+            if resumed:
+                state.session_id = resumed
+                if resumed != stored:
+                    save_session_id(self.storage_dir, acct_id, chat_id, resumed)
+                return resumed
+        session_id = await gateway.session_create(title=self._chat_session_title(acct_id, chat_id))
+        state.session_id = session_id
+        save_session_id(self.storage_dir, acct_id, chat_id, session_id)
+        return session_id
+
     def _build_batch_prompt_text(self, batch):
-        return self._merge_followup_texts(
+        text = self._merge_followup_texts(
             batch,
             text_of=lambda message: message.combined_text,
             empty="The user sent attachments without additional text.",
         )
+        if any(item.attachments for item in batch):
+            return ("%s\n\n%s" % (text, STATION_OUTBOUND_HINT)).strip()
+        return text
 
     async def _attach_attachments_to_hermes(self, *, gateway, session_id, attachments):
         for attachment in attachments:
@@ -183,6 +219,10 @@ class HermesWorker(PrototypeVoice, PrototypeBridgeWorker):
                     continue
                 if self._is_image_attachment(attachment, local_path=local_path):
                     if self._launch_settings().uses_local_llm():
+                        await gateway.request(
+                            "file.attach",
+                            {"session_id": session_id, "path": local_path, "name": display_name},
+                        )
                         continue
                     await gateway.request("image.attach", {"session_id": session_id, "path": local_path})
                     continue
@@ -239,8 +279,7 @@ class HermesWorker(PrototypeVoice, PrototypeBridgeWorker):
             chat_id=chat_id,
             acct_id=acct_id,
             platform=state.platform,
-            chat_type=state.chat_type,
-        )
+            chat_type=state.chat_type)
 
     async def _resolve_pending_request(self, *, gateway, state, incoming_text):
         pending = state.pending_request
@@ -284,6 +323,12 @@ class HermesWorker(PrototypeVoice, PrototypeBridgeWorker):
                 acct_id=dest["acct_id"],
                 text=text,
                 include_voice=state.reply_with_voice,
+                platform=dest["platform"],
+                chat_type=dest["chat_type"],
+            )
+            await self._drain_station_outbound(
+                chat_id=dest["chat_id"],
+                acct_id=dest["acct_id"],
                 platform=dest["platform"],
                 chat_type=dest["chat_type"],
             )
@@ -353,8 +398,7 @@ class HermesWorker(PrototypeVoice, PrototypeBridgeWorker):
                     chat_id=dest["chat_id"],
                     acct_id=dest["acct_id"],
                     platform=dest["platform"],
-                    chat_type=dest["chat_type"],
-                )
+                    chat_type=dest["chat_type"])
                 return
 
             if event.type == "error":
@@ -395,16 +439,14 @@ class HermesWorker(PrototypeVoice, PrototypeBridgeWorker):
                 chat_id=chat_id,
                 acct_id=acct_id,
                 platform=platform,
-                chat_type=chat_type,
-            )
+                chat_type=chat_type)
             return True
         await self.send_outbound(
             text="Hermes error: %s" % (message or "Hermes gateway error"),
             chat_id=chat_id,
             acct_id=acct_id,
             platform=platform,
-            chat_type=chat_type,
-        )
+            chat_type=chat_type)
         return True
 
     def _pending_prompt_text(self, event):
@@ -434,7 +476,12 @@ class HermesWorker(PrototypeVoice, PrototypeBridgeWorker):
             )
             return ""
 
-        return await PrototypeVoice._prepare_voice_input(self, attachments, transcribe=transcribe)
+        return await PrototypeVoice._prepare_voice_input(
+            self,
+            attachments,
+            transcribe=transcribe,
+            keep_untranscribed=True,
+        )
 
     def _should_send_voice_reply(self, *, incoming_had_audio, reply_mode="voice_only"):
         settings = self._settings
@@ -460,9 +507,7 @@ class HermesWorker(PrototypeVoice, PrototypeBridgeWorker):
         )
 
     async def _send_voice(self, *, chat_id, acct_id, text, platform="", chat_type=""):
-        settings = self._launch_settings()
-        delivery = settings.voice_delivery_method
-        output_path = Path(self.storage_dir) / "voice_replies" / ("%s%s" % (uuid.uuid4().hex, voice_delivery_suffix(delivery)))
+        output_path = Path(self.storage_dir) / "voice_replies" / ("%s.ogg" % uuid.uuid4().hex)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         gateway = await self._ensure_gateway()
         result = await gateway.request("audio.synthesize", {"text": text, "output_path": str(output_path)}, timeout_s=300.0)
@@ -478,23 +523,15 @@ class HermesWorker(PrototypeVoice, PrototypeBridgeWorker):
         finally:
             with contextlib.suppress(OSError):
                 file_path.unlink()
-        voice_compatible = result.get("voice_compatible")
-        if voice_compatible is not None:
-            voice_compatible = ext_bool("voice_compatible", voice_compatible)
-        use_voice = delivery == "voice" and bool(voice_compatible)
-        att_type = "voice" if use_voice else "audio"
-        meta = self.save_temp(
-            data=audio_bytes,
-            original_name=file_path.name,
-            mime_type=voice_delivery_mime(
-                "voice" if use_voice or file_path.suffix.lower() == ".ogg" else "audio"
-            ),
-            ext=file_path.suffix.lstrip(".") or ("ogg" if use_voice else "mp3"),
-        )
-        await self.send_outbound(
-            attachments=[{"type": att_type, "file_id": meta["file_id"]}],
+        content_type = ""
+        if file_path.suffix.lower() in {".ogg", ".opus"}:
+            content_type = "audio/ogg"
+        await self._send_voice_bytes(
             chat_id=chat_id,
             acct_id=acct_id,
+            audio_bytes=audio_bytes,
+            content_type=content_type,
+            name="hermes_tts",
             platform=platform,
             chat_type=chat_type,
         )

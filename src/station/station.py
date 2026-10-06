@@ -360,13 +360,10 @@ class Station:
 
                 token_state = TokenState(token)
                 proto_version = 0
-                proto_type = ""
                 stored = await self.db.get_prototype_info(pid)
                 if stored:
                     if stored.get("version") is not None:
                         proto_version = stored["version"]
-                    if stored.get("type") is not None:
-                        proto_type = stored["type"]
                 client_context = ClientContext(
                     session=session,
                     consul_url=consul_url,
@@ -374,7 +371,6 @@ class Station:
                     prototype_id=pid,
                     token=token_state.token,
                     prototype_version=proto_version,
-                    prototype_type=proto_type,
                     db=self.db,
                     app=self.app,
                 )

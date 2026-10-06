@@ -51,7 +51,6 @@ class PrototypeDiscordVoice:
         return await self.send_proxy(
             method="send_discord_voice",
             chat_id=chat_id,
-            request_id=request_id if request_id else None,
             params=params,
             acct_id=acct_id if acct_id else None,
         )
@@ -71,11 +70,9 @@ class PrototypeDiscordVoice:
                 await self.send_outbound(
                     text="This model does not support voice calls. Continuing as a text channel.",
                     chat_id=channel_id,
-                    request_id=request_id if request_id else None,
                     acct_id=acct_id if acct_id else None,
                     platform=platform,
-                    chat_type=chat_type,
-                )
+                    chat_type=chat_type)
             logger.debug("call_support skipped model_id=%s", model_id)
             return True
         guild_id = ext_str("guild_id", chat_opened.get("guild_id")) or None

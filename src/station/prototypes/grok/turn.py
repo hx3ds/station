@@ -1,12 +1,25 @@
 import base64
+import json
 import mimetypes
 import os
 
 from station import logger
+from station.errors import ExternalError
+from station.prototypes.chat_history import (
+    apply_compact_summary,
+    format_transcript,
+    history_sender,
+    load_messages,
+    needs_compact,
+    remember_chat_route,
+    save_messages,
+    split_for_compact,
+)
+from station.prototypes.grok.tools import CHAT_TOOLS, record_outbound, tool_result
 from station.prototypes.voice import PrototypeVoice
 
 from . import auth_store
-from .client import complete_chat, fetch_usage, generate_image, synthesize_speech, transcribe_audio
+from .client import complete_chat, fetch_usage, generate_image, generate_video, synthesize_speech, transcribe_audio
 
 BUSY_REPLY_TEXT = "I'm still processing your previous message. Please wait."
 
@@ -27,8 +40,25 @@ class GrokTurn(PrototypeVoice):
             chat_id=chat_id,
             acct_id=acct_id,
             platform=platform,
-            chat_type=chat_type,
+            chat_type=chat_type)
+
+    async def _send_video(self, *, chat_id, acct_id, video_bytes, mime="video/mp4", caption="", platform="", chat_type=""):
+        if not video_bytes:
+            return
+        content_type = (mime or "video/mp4").split(";")[0].strip().lower() or "video/mp4"
+        suffix = ".webm" if content_type == "video/webm" else ".mov" if content_type == "video/quicktime" else ".mp4"
+        meta = self.save_temp(
+            data=video_bytes,
+            original_name="grok_vid%s" % suffix,
+            mime_type=content_type,
         )
+        await self.send_outbound(
+            text=caption or "",
+            attachments=[{"type": "video", "file_id": meta["file_id"]}],
+            chat_id=chat_id,
+            acct_id=acct_id,
+            platform=platform,
+            chat_type=chat_type)
 
     async def _photo_attachment_to_data_url(self, *, attachment):
         local_path = self._attachment_str(attachment, "local_path")
@@ -82,7 +112,6 @@ class GrokTurn(PrototypeVoice):
             chat_id=chat_id,
             acct_id=acct_id,
             audio_bytes=audio,
-            delivery_method=settings.voice_delivery_method,
             content_type=content_type,
             name="grok_tts",
             platform=platform,
@@ -105,8 +134,7 @@ class GrokTurn(PrototypeVoice):
                 acct_id=acct_id,
                 reply_to=reply_to,
                 platform=platform,
-                chat_type=chat_type,
-            )
+                chat_type=chat_type)
             return
         auth_store.save_credentials(self.storage_dir, acct_id, creds)
         reply = await fetch_usage(session=None, access_token=creds.access)
@@ -115,18 +143,16 @@ class GrokTurn(PrototypeVoice):
             chat_id=chat_id,
             acct_id=acct_id,
             platform=platform,
-            chat_type=chat_type,
-        )
+            chat_type=chat_type)
 
     async def _handle_generate_command(self, *, prompt, chat_id, acct_id, settings, reply_to=None, platform="", chat_type=""):
         if not prompt:
             await self.send_outbound(
-                text="Usage: /generate <prompt>",
+                text="Usage: /image <prompt>",
                 chat_id=chat_id,
                 acct_id=acct_id,
                 platform=platform,
-                chat_type=chat_type,
-            )
+                chat_type=chat_type)
             return
 
         busy_key = (acct_id, chat_id)
@@ -136,8 +162,7 @@ class GrokTurn(PrototypeVoice):
                 chat_id=chat_id,
                 acct_id=acct_id,
                 platform=platform,
-                chat_type=chat_type,
-            )
+                chat_type=chat_type)
             return
 
         self._active_chat_requests.add(busy_key)
@@ -157,8 +182,7 @@ class GrokTurn(PrototypeVoice):
                     acct_id=acct_id,
                     reply_to=reply_to,
                     platform=platform,
-                    chat_type=chat_type,
-                )
+                    chat_type=chat_type)
                 return
 
             image_bytes, mime, err = await generate_image(
@@ -173,8 +197,7 @@ class GrokTurn(PrototypeVoice):
                     chat_id=chat_id,
                     acct_id=acct_id,
                     platform=platform,
-                    chat_type=chat_type,
-                )
+                    chat_type=chat_type)
                 return
 
             await self._send_photo(
@@ -182,14 +205,23 @@ class GrokTurn(PrototypeVoice):
                 acct_id=acct_id,
                 image_bytes=image_bytes,
                 mime=mime,
-                caption=prompt[:1024],
+                caption=prompt,
                 platform=platform,
                 chat_type=chat_type,
             )
         finally:
             self._active_chat_requests.discard(busy_key)
 
-    async def _run_chat_turn(self, *, chat_id, acct_id, settings, text, photo_attachment, voice_attachment, reply_to=None, platform="", chat_type=""):
+    async def _handle_generate_video_command(self, *, prompt, chat_id, acct_id, settings, reply_to=None, platform="", chat_type=""):
+        if not prompt:
+            await self.send_outbound(
+                text="Usage: /video <prompt>",
+                chat_id=chat_id,
+                acct_id=acct_id,
+                platform=platform,
+                chat_type=chat_type)
+            return
+
         busy_key = (acct_id, chat_id)
         if busy_key in self._active_chat_requests:
             await self.send_outbound(
@@ -197,8 +229,65 @@ class GrokTurn(PrototypeVoice):
                 chat_id=chat_id,
                 acct_id=acct_id,
                 platform=platform,
+                chat_type=chat_type)
+            return
+
+        self._active_chat_requests.add(busy_key)
+        try:
+            access_token = await self._resolve_access_token(acct_id=acct_id, settings=settings)
+            if not access_token:
+                reply = await self._start_login(
+                    acct_id=acct_id,
+                    chat_id=chat_id,
+                    reply_to=reply_to,
+                    platform=platform,
+                    chat_type=chat_type,
+                )
+                await self.send_outbound(
+                    text=reply,
+                    chat_id=chat_id,
+                    acct_id=acct_id,
+                    reply_to=reply_to,
+                    platform=platform,
+                    chat_type=chat_type)
+                return
+
+            video_bytes, mime, err = await generate_video(
+                session=None,
+                settings=settings,
+                access_token=access_token,
+                prompt=prompt,
+            )
+            if err or not video_bytes:
+                await self.send_outbound(
+                    text=err or "Grok video generation failed.",
+                    chat_id=chat_id,
+                    acct_id=acct_id,
+                    platform=platform,
+                    chat_type=chat_type)
+                return
+
+            await self._send_video(
+                chat_id=chat_id,
+                acct_id=acct_id,
+                video_bytes=video_bytes,
+                mime=mime,
+                caption=prompt,
+                platform=platform,
                 chat_type=chat_type,
             )
+        finally:
+            self._active_chat_requests.discard(busy_key)
+
+    async def _run_chat_turn(self, *, chat_id, acct_id, settings, text, photo_attachment, voice_attachment, reply_to=None, platform="", chat_type="", user_id="", sender=None):
+        busy_key = (acct_id, chat_id)
+        if busy_key in self._active_chat_requests:
+            await self.send_outbound(
+                text=BUSY_REPLY_TEXT,
+                chat_id=chat_id,
+                acct_id=acct_id,
+                platform=platform,
+                chat_type=chat_type)
             return
 
         self._active_chat_requests.add(busy_key)
@@ -226,8 +315,7 @@ class GrokTurn(PrototypeVoice):
                     acct_id=acct_id,
                     reply_to=reply_to,
                     platform=platform,
-                    chat_type=chat_type,
-                )
+                    chat_type=chat_type)
                 return
 
             photo_data_url = ""
@@ -269,33 +357,55 @@ class GrokTurn(PrototypeVoice):
                 prompt_text = "\n".join(prompt_parts).strip()
                 if not prompt_text:
                     return
-                content = prompt_text
+                model_text = prompt_text
+                if acct_id or chat_id:
+                    model_text = "Current chat acct_id=%s chat_id=%s.\n%s" % (acct_id, chat_id, prompt_text)
+                content = model_text
                 if photo_data_url:
                     content = [
-                        {"type": "text", "text": prompt_text},
+                        {"type": "text", "text": model_text},
                         {"type": "image_url", "image_url": {"url": photo_data_url}},
                     ]
+                turn_sender = history_sender(user_id, sender)
                 reply_text = await complete_chat(
                     session=None,
                     settings=settings,
                     access_token=access_token,
                     user_content=content,
+                    history=await self._load_compacted_history(
+                        acct_id=acct_id,
+                        chat_id=chat_id,
+                        settings=settings,
+                        access_token=access_token,
+                    ),
+                    sender=turn_sender,
+                    tools=CHAT_TOOLS,
+                    run_tool=self._run_grok_tool,
                 )
+                if self._grok_reply_ok(reply_text):
+                    self._append_chat_turn(
+                        acct_id=acct_id,
+                        chat_id=chat_id,
+                        user_text=prompt_text,
+                        reply_text=reply_text,
+                        sender=turn_sender,
+                        platform=platform,
+                        chat_type=chat_type,
+                    )
 
             await self.send_outbound(
                 text=reply_text,
                 chat_id=chat_id,
                 acct_id=acct_id,
                 platform=platform,
-                chat_type=chat_type,
-            )
+                chat_type=chat_type)
 
             send_voice = self._should_send_voice_reply(
                 incoming_had_audio=voice_attachment is not None,
                 reply_mode=settings.voice_reply_mode,
             )
             if send_voice:
-                if reply_text and not reply_text.startswith("Grok request failed:") and "Sign in to Grok" not in reply_text:
+                if self._grok_reply_ok(reply_text):
                     await self._send_voice_reply(
                         chat_id=chat_id,
                         acct_id=acct_id,
@@ -307,3 +417,78 @@ class GrokTurn(PrototypeVoice):
                     )
         finally:
             self._active_chat_requests.discard(busy_key)
+
+    def _grok_reply_ok(self, reply_text):
+        text = (reply_text or "").strip()
+        if not text:
+            return False
+        if text.startswith("Grok request failed:") or text.startswith("Grok not configured"):
+            return False
+        if "Sign in to Grok" in text:
+            return False
+        return True
+
+    async def _load_compacted_history(self, *, acct_id, chat_id, settings, access_token):
+        history = load_messages(self.storage_dir, acct_id, chat_id)
+        if not needs_compact(history):
+            return history
+        head, tail = split_for_compact(history)
+        transcript = format_transcript(head)
+        if not transcript:
+            save_messages(self.storage_dir, acct_id, chat_id, tail)
+            return tail
+        summary = await complete_chat(
+            session=None,
+            settings=settings,
+            access_token=access_token,
+            user_content=(
+                "Summarize this conversation for later turns. "
+                "Keep names, decisions, files, and open tasks. Be concise.\n\n%s" % transcript
+            ),
+        )
+        if self._grok_reply_ok(summary):
+            compacted = apply_compact_summary(summary, tail)
+        else:
+            compacted = tail
+        save_messages(self.storage_dir, acct_id, chat_id, compacted)
+        return compacted
+
+    async def _run_grok_tool(self, name, arguments):
+        try:
+            result = tool_result(self.storage_dir, name, arguments)
+        except ExternalError as exc:
+            return json.dumps({"ok": False, "error": str(exc)})
+        send = result.get("send")
+        if not send:
+            return json.dumps(result)
+        attachments = self._attachments_from_refs(send.get("files") or [])
+        if (send.get("files") or []) and not attachments:
+            return json.dumps({"ok": False, "error": "files could not be sent"})
+        sent = await self.send_outbound(
+            text=send["text"],
+            attachments=attachments or None,
+            chat_id=send["chat_id"],
+            acct_id=send["acct_id"],
+            platform=send["platform"],
+            chat_type=send["chat_type"])
+        if not sent:
+            return json.dumps({"ok": False, "error": "send failed"})
+        record_outbound(self.storage_dir, send["acct_id"], send["chat_id"], send["text"])
+        return json.dumps({
+            "ok": True,
+            "sent": True,
+            "acct_id": send["acct_id"],
+            "chat_id": send["chat_id"],
+            "user_id": send["user_id"],
+        })
+
+    def _append_chat_turn(self, *, acct_id, chat_id, user_text, reply_text, sender=None, platform="", chat_type=""):
+        history = load_messages(self.storage_dir, acct_id, chat_id)
+        if not history or history[-1].get("role") != "user" or history[-1].get("content") != user_text:
+            user_message = {"role": "user", "content": user_text}
+            if sender:
+                user_message["sender"] = sender
+            history.append(user_message)
+        history.append({"role": "assistant", "content": reply_text})
+        save_messages(self.storage_dir, acct_id, chat_id, history)
+        remember_chat_route(self.storage_dir, acct_id, chat_id, platform=platform, chat_type=chat_type)

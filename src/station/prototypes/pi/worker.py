@@ -8,12 +8,19 @@ from station.prototypes.bridge_worker import PrototypeBridgeWorker
 class PendingTurnMessage:
     message: str
     images: list = field(default_factory=list)
+    reply_with_voice: bool = False
 
 class PiWorker(PrototypeBridgeWorker):
     def _bridge_worker_error_text(self, error):
         return "Pi bridge error: %s" % error
 
-    async def _enqueue_turn(self, *, message, images, chat_id, acct_id, platform="", chat_type=""):
+    async def _drop_backend_session(self, *, session_id, chat_id, acct_id):
+        gateway = self._gateway
+        if gateway is None:
+            return
+        await gateway.drop_chat(acct_id=acct_id, chat_id=chat_id)
+
+    async def _enqueue_turn(self, *, message, images, chat_id, acct_id, platform="", chat_type="", reply_with_voice=False):
         state = await self._get_chat_state(acct_id=acct_id, chat_id=chat_id)
         gateway = await self._ensure_gateway()
 
@@ -45,7 +52,7 @@ class PiWorker(PrototypeBridgeWorker):
             gateway=gateway,
             chat_id=chat_id,
             acct_id=acct_id,
-            item=PendingTurnMessage(message=message, images=list(images or [])),
+            item=PendingTurnMessage(message=message, images=list(images or []), reply_with_voice=reply_with_voice),
             platform=platform,
             chat_type=chat_type,
         )
@@ -56,7 +63,7 @@ class PiWorker(PrototypeBridgeWorker):
             if payload is None:
                 return
 
-            message, images = payload
+            message, images, reply_with_voice = payload
             rpc = await gateway.ensure_chat(acct_id=acct_id, chat_id=chat_id)
             state.busy = True
             try:
@@ -66,8 +73,9 @@ class PiWorker(PrototypeBridgeWorker):
                 state.busy = False
 
             if reply:
-                await self.send_outbound(
+                await self._deliver_turn_reply(
                     text=reply,
+                    include_voice=reply_with_voice,
                     chat_id=chat_id,
                     acct_id=acct_id,
                     platform=state.platform,
@@ -78,14 +86,16 @@ class PiWorker(PrototypeBridgeWorker):
         def merge_many(messages):
             text_parts = []
             images = []
+            reply_with_voice = False
             for index, item in enumerate(messages, start=1):
                 text_parts.append(self._queued_followup_label(index, item.message))
                 images.extend(item.images)
-            return "\n\n".join(text_parts), images
+                reply_with_voice = reply_with_voice or item.reply_with_voice
+            return "\n\n".join(text_parts), images, reply_with_voice
 
         return await self._pop_batched_items(
             state=state,
-            merge_one=lambda message: (message.message, list(message.images)),
+            merge_one=lambda message: (message.message, list(message.images), message.reply_with_voice),
             merge_many=merge_many,
         )
 

@@ -64,6 +64,37 @@ def is_pdf_attachment(attachment, *, local_path=""):
         return Path(local_path).suffix.lower() == ".pdf"
     return False
 
+def attachment_type_for_path(path, *, mime=""):
+    content_type = (mime or "").strip().lower()
+    suffix = Path(path or "").suffix.lower()
+    if content_type.startswith("image/") or suffix in IMAGE_SUFFIXES:
+        return "photo"
+    if content_type.startswith("audio/") or suffix in AUDIO_SUFFIXES:
+        if suffix in {".ogg", ".opus"}:
+            return "voice"
+        return "audio"
+    return "document"
+
+def find_image_attachment(attachments, *, require_file_id=False):
+    for att in normalize_attachments(attachments):
+        local_path = attachment_str(att, "local_path")
+        if not is_image_attachment(att, local_path=local_path):
+            continue
+        if require_file_id and not att.get("file_id"):
+            continue
+        return att
+    return None
+
+def find_audio_attachment(attachments, *, require_file_id=False):
+    for att in normalize_attachments(attachments):
+        local_path = attachment_str(att, "local_path")
+        if not is_audio_attachment(att, local_path=local_path):
+            continue
+        if require_file_id and not att.get("file_id"):
+            continue
+        return att
+    return None
+
 def normalize_attachments(value):
     return validate_attachments(value)
 

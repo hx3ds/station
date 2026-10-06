@@ -323,18 +323,8 @@ def _optional_int_field(src: dict, key: str, default: int) -> int:
         return default
     return ext_int(key, src[key])
 
-def _optional_float_field(src: dict, key: str, default: float) -> float:
-    if key not in src or src[key] is None:
-        return default
-    return float(ext_float(key, src[key]))
-
 def _complete_ensure_prototype_payload(payload: dict) -> dict:
     src = dict(payload)
-    raw_type = src.get("type")
-    if raw_type is None:
-        p_type = "token"
-    else:
-        p_type = ext_str("type", raw_type).strip() or "token"
     raw_local = src.get("is_local")
     if raw_local is None:
         is_local = False
@@ -342,11 +332,9 @@ def _complete_ensure_prototype_payload(payload: dict) -> dict:
         is_local = ext_bool("is_local", raw_local)
     billing_interval = src.get("billing_interval")
     if billing_interval is None:
-        billing_interval = "monthly" if p_type == "subscription" else ""
-    elif p_type != "subscription":
-        billing_interval = ""
+        billing_interval = "monthly"
     else:
-        billing_interval = ext_str("billing_interval", billing_interval, strip=False)
+        billing_interval = ext_str("billing_interval", billing_interval, strip=False).strip() or "monthly"
     qr_platforms = src.get("qr_platforms")
     if qr_platforms is None:
         qr_platforms = []
@@ -370,16 +358,14 @@ def _complete_ensure_prototype_payload(payload: dict) -> dict:
         "status": _optional_str_field(src, "status", "active") or "active",
         "private": True if is_local else private,
         "max_chats": _optional_int_field(src, "max_chats", 1),
-        "charge": 0 if is_local else _optional_float_field(src, "charge", 0),
-        "max_charge_per_message": 0 if is_local else _optional_float_field(src, "max_charge_per_message", 0),
-        "type": p_type,
+        "charge": 0 if is_local else _optional_int_field(src, "charge", 0),
+        "type": "subscription",
         "billing_interval": billing_interval,
-        "reply_window": _optional_int_field(src, "reply_window", 600),
         "is_local": is_local,
         "qr_platforms": qr_platforms,
         "terms_of_use": _optional_str_field(src, "terms_of_use", ""),
         "privacy_policy": _optional_str_field(src, "privacy_policy", ""),
-        "call_support": call_support if p_type == "subscription" else False,
+        "call_support": call_support,
     }
 
 async def _ensure_prototype(*, session: aiohttp.ClientSession, consul_url: str, payload: dict) -> dict:
@@ -411,8 +397,6 @@ def _payload_from_prototype_entry(entry: dict) -> dict[str, object]:
         "private": "private",
         "max_chats": "max_chats",
         "charge": "charge",
-        "max_charge_per_message": "max_charge_per_message",
-        "reply_window": "reply_window",
         "is_local": "is_local",
         "billing_interval": "billing_interval",
         "terms_of_use": "terms_of_use",
@@ -560,8 +544,7 @@ def _build_attach_prototype_parser(prog_name: str) -> argparse.ArgumentParser:
     parser.add_argument("--status", dest="status", default=None)
     parser.add_argument("--private", dest="private", type=_parse_bool, default=None)
     parser.add_argument("--max-chats", dest="max_chats", type=int, default=None)
-    parser.add_argument("--charge", dest="charge", type=float, default=None)
-    parser.add_argument("--reply-window", dest="reply_window", type=int, default=None)
+    parser.add_argument("--charge", dest="charge", type=int, default=None)
     parser.add_argument("--is-local", dest="is_local", type=_parse_bool, default=None)
     return parser
 
@@ -740,7 +723,6 @@ def _run_attach_prototype(args: argparse.Namespace) -> int:
                     "private": args.private,
                     "max_chats": args.max_chats,
                     "charge": args.charge,
-                    "reply_window": args.reply_window,
                     "is_local": args.is_local,
                 }.items():
                     if value is not None:
@@ -815,8 +797,7 @@ def _build_run_parser(prog_name: str) -> argparse.ArgumentParser:
     parser.add_argument("--status", dest="status")
     parser.add_argument("--private", dest="private", type=_parse_bool)
     parser.add_argument("--max-chats", dest="max_chats", type=int)
-    parser.add_argument("--charge", dest="charge", type=float)
-    parser.add_argument("--reply-window", dest="reply_window", type=int)
+    parser.add_argument("--charge", dest="charge", type=int)
     parser.add_argument("--is-local", dest="is_local", type=_parse_bool)
     return parser
 
@@ -881,7 +862,6 @@ def run_cli(
             "private": args.private,
             "max_chats": args.max_chats,
             "charge": args.charge,
-            "reply_window": args.reply_window,
             "is_local": args.is_local,
         }
         code = asyncio.run(

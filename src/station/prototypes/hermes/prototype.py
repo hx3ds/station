@@ -1,9 +1,11 @@
 import json
+import os
 from pathlib import Path
 
 from station import logger
 from station.config.config import merge_nested
 from station.prototypes.gateway_lifecycle import PrototypeGateway
+from station.prototypes.model_config import PrototypeModelConfig, load_overlay
 from station.prototypes.prototype import Prototype
 
 from .auth_flow import HermesAuthFlow
@@ -12,7 +14,7 @@ from .gateway_client import HermesGatewayProcess
 from .worker import HermesWorker
 
 
-class HermesPrototype(HermesAuthFlow, HermesWorker, PrototypeGateway, Prototype):
+class HermesPrototype(PrototypeModelConfig, HermesAuthFlow, HermesWorker, PrototypeGateway, Prototype):
     def __init__(self, app, prototype_id, model_id, model_settings=None, *, config_file=None, secret_file=None):
         super().__init__(
             app,
@@ -38,24 +40,41 @@ class HermesPrototype(HermesAuthFlow, HermesWorker, PrototypeGateway, Prototype)
             self.model_settings,
             default_workspace=self.storage_dir,
             config_file=self.config_file,
+            secret_file=self.secret_file,
+            overlay=load_overlay(self.storage_dir),
         )
 
-    def _launch_settings(self):
-        if self._settings is not None:
-            return self._settings
-        return self._build_settings()
+    def _config_api_key_path(self):
+        settings = self._launch_settings()
+        if settings.uses_local_llm():
+            return "local_llm.api_key"
+        provider = (settings.provider or "").strip().lower()
+        mapping = {
+            "openrouter": "keys.openrouter_api_key",
+            "openai": "keys.openai_api_key",
+            "anthropic": "keys.anthropic_api_key",
+            "groq": "keys.groq_api_key",
+            "xai": "keys.xai_api_key",
+            "xai-oauth": "keys.xai_api_key",
+            "mistral": "keys.mistral_api_key",
+            "google": "keys.google_api_key",
+            "gemini": "keys.gemini_api_key",
+        }
+        return mapping.get(provider, "keys.openai_api_key")
+
+    def _config_accepts_key_message(self, settings):
+        if settings.uses_local_llm():
+            return False
+        return not self._has_cloud_api_key(settings)
+
+    def _workspace_root(self):
+        return os.path.expanduser(self._launch_settings().workspace_dir)
 
     async def _start_gateway_locked(self):
         settings = self._build_settings()
         Path(settings.workspace_dir).expanduser().mkdir(parents=True, exist_ok=True)
         if not settings.hermes_root.exists():
             raise FileNotFoundError("Hermes root not found: %s" % settings.hermes_root)
-        if settings.uses_local_llm() and not settings.local_llm_base_url:
-            raise RuntimeError(
-                "Hermes local LLM requires [local_llm].base_url or LOCAL_LLM_BASE_URL "
-                "(OpenAI-compatible, ending in /v1)"
-            )
-
         hermes_home = hermes_home_path(self.storage_dir)
         await self._prepare_hermes_home(hermes_home=hermes_home, settings=settings)
         self._write_hermes_config(hermes_home=hermes_home, settings=settings)
@@ -91,6 +110,12 @@ class HermesPrototype(HermesAuthFlow, HermesWorker, PrototypeGateway, Prototype)
         config = {
             "approvals": {"mode": hermes_approvals},
             "terminal": {"cwd": settings.workspace_dir},
+            "compression": {
+                "enabled": True,
+                "threshold": 0.50,
+                "protect_last_n": 20,
+                "in_place": True,
+            },
         }
         model_cfg = {}
         provider = settings.gateway_provider()
@@ -132,6 +157,12 @@ class HermesPrototype(HermesAuthFlow, HermesWorker, PrototypeGateway, Prototype)
             encoding="utf-8",
         )
 
+    def _kind_help_commands(self):
+        return [
+            ("/login", "Sign in"),
+            ("/logout", "Sign out"),
+        ]
+
     async def _handle_kind_command(self, *, cmd, args, chat_id, acct_id, reply_to, model_settings, platform="", chat_type=""):
         if cmd == "/start":
             await self._ensure_provider_auth(
@@ -157,14 +188,6 @@ class HermesPrototype(HermesAuthFlow, HermesWorker, PrototypeGateway, Prototype)
         return True
 
     async def _handle_inbound_context(self, ctx):
-        if await self._dispatch_kind_command(
-            ctx.data,
-            ctx.model_settings,
-            chat_id=ctx.chat_id,
-            acct_id=ctx.acct_id,
-            text=ctx.text,
-        ):
-            return
         if not await self._ensure_provider_auth(
             acct_id=ctx.acct_id,
             chat_id=ctx.chat_id,
@@ -173,23 +196,6 @@ class HermesPrototype(HermesAuthFlow, HermesWorker, PrototypeGateway, Prototype)
             platform=ctx.platform,
             chat_type=ctx.chat_type,
         ):
-            return
-
-        settings = self._launch_settings()
-        if settings.uses_local_llm():
-            if not ctx.text and not ctx.attachments:
-                return
-            await self._enqueue_message(
-                raw_text=ctx.text,
-                combined_text=ctx.text,
-                attachments=ctx.attachments,
-                reply_with_voice=False,
-                chat_id=ctx.chat_id,
-                acct_id=ctx.acct_id,
-                platform=ctx.platform,
-                chat_type=ctx.chat_type,
-                message_id=ctx.reply_to,
-            )
             return
 
         remaining, transcript, had_audio = await self._prepare_voice_input(attachments=ctx.attachments)
@@ -202,10 +208,8 @@ class HermesPrototype(HermesAuthFlow, HermesWorker, PrototypeGateway, Prototype)
                     text="Hermes could not transcribe the audio message. Check the STT provider or send a clearer recording.",
                     chat_id=ctx.chat_id,
                     acct_id=ctx.acct_id,
-                    request_id=ctx.request_id,
                     platform=ctx.platform,
-                    chat_type=ctx.chat_type,
-                )
+                    chat_type=ctx.chat_type)
             return
 
         await self._enqueue_message(
@@ -218,4 +222,5 @@ class HermesPrototype(HermesAuthFlow, HermesWorker, PrototypeGateway, Prototype)
             platform=ctx.platform,
             chat_type=ctx.chat_type,
             message_id=ctx.reply_to,
+            user_id=ctx.user_id,
         )

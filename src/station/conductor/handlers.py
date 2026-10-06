@@ -18,6 +18,8 @@ from station.conductor.platform_types import (
     validate_local_platform_type,
 )
 from station.conductor.platforms import LocalPlatformAdapter, build_builtin_platforms
+from station.conductor.platforms.chat_type import station_chat_type
+from station.conductor.platforms.group_settings import controls_group_messages, ensure_group_notice
 from station.conductor.pair import PairManager
 from station.conductor.util import constant_time_equal, err, ext_bool, ext_int, ext_str, ok, catch_external
 from station.errors import ExternalError
@@ -148,6 +150,8 @@ class LocalConductor:
         acct_type = acct_type.strip().lower()
         if adapter is None:
             return err(f"No adapter registered for {acct_type}", status=501)
+        payload.pop("parse_mode", None)
+        payload.pop("format", None)
 
         try:
             if method == "send_typing":
@@ -394,6 +398,71 @@ class LocalConductor:
             out.append(c)
         return out
 
+    def _consul_chat_op_may_be_desync(self, body) -> bool:
+        if not body:
+            return False
+        if body.get("result") == 0:
+            return False
+        msg = str(body.get("msg") or "").lower()
+        if "max chats" in msg or "already exists" in msg or "unauthorized" in msg:
+            return False
+        return (
+            "account not assigned" in msg
+            or "model not found" in msg
+            or "chat insert conflict" in msg
+        )
+
+    async def _reconcile_model_from_consul(self, *, model_id: str, prototype_id) -> None:
+        remote = await self.fetch_model_from_consul(model_id=model_id)
+        if not remote:
+            raise ExternalError("Model not found")
+        if prototype_id is None:
+            prototype_id = remote.get("prototype_id")
+        accts = remote.get("accts")
+        if accts is None:
+            accts = []
+        accts = ext_list('accts', accts)
+        remote_ids = set()
+        model_key = str(model_id).replace("-", "").strip().lower()
+        for a in accts:
+            a = ext_dict('acct', a)
+            acct_id = a.get("acct_id")
+            acct_id = ext_str(acct_id, 'acct_id', default="")
+            if not acct_id:
+                raise ExternalError("acct_id must be non-empty str")
+            acct_id = acct_id.replace("-", "").strip().lower()
+            remote_ids.add(acct_id)
+            acct_type = a.get("acct_type")
+            if acct_type is None:
+                acct_type = a.get("type")
+            acct_type = ext_str(acct_type, 'acct_type')
+            username = ext_str(a.get("acct_username"), "acct_username")
+            server = ext_str(a.get("server"), "server")
+            encrypted_token = ext_str(a.get("acct_token"), "acct_token")
+            await self.db.upsert_local_account(
+                acct_id=acct_id,
+                model_id=model_id,
+                prototype_id=prototype_id,
+                acct_type=acct_type.strip(),
+                username=username.strip(),
+                server=server.strip(),
+                encrypted_token=encrypted_token.strip(),
+                is_local=True,
+            )
+        for la in await self.db.list_local_accounts():
+            local_model = str(la.get("model_id") or "").replace("-", "").strip().lower()
+            if local_model != model_key:
+                continue
+            stored = str(la.get("acct_id") or "")
+            lid = stored.replace("-", "").strip().lower()
+            if lid in remote_ids and stored.replace("-", "").strip().lower() == stored.strip().lower():
+                continue
+            await self.db.delete_local_account(stored)
+        chats = await self.fetch_model_chats_from_consul(model_id=model_id)
+        if chats is None:
+            raise ExternalError("chats fetch failed")
+        await self.db.replace_model_chats(model_id=model_id, prototype_id=prototype_id, chats=chats)
+
     async def ensure_chat_mapping(self, *, acct_id: str, chat_id: str, chat_type: str, carrier_user_id: str | None, force: bool = False) -> str | None:
         if acct_id is None:
             acct_id = ""
@@ -428,16 +497,32 @@ class LocalConductor:
             carrier = "unknown"
         else:
             carrier = carrier_user_id.strip() or "unknown"
+        payload = {
+            "chat_id": chat_id,
+            "model_id": model_id,
+            "acct_id": acct_id,
+            "chat_type": chat_type,
+            "carrier_user_id": carrier,
+        }
         body = await self._consul_post_full(
             path="/api/local_conductor/add_chat_to_model",
-            payload={
-                "chat_id": chat_id,
-                "model_id": model_id,
-                "acct_id": acct_id,
-                "chat_type": chat_type,
-                "carrier_user_id": carrier,
-            },
+            payload=payload,
         )
+        if self._consul_chat_op_may_be_desync(body):
+            prototype_id = acct.get("prototype_id")
+            stored_model = await self.db.get_model(model_id)
+            if stored_model and stored_model.get("prototype_id") is not None:
+                prototype_id = stored_model.get("prototype_id")
+            try:
+                await self._reconcile_model_from_consul(model_id=model_id, prototype_id=prototype_id)
+            except ExternalError as exc:
+                logger.error("chat reconcile failed model_id=%s error=%s", model_id, exc)
+            except Exception as e:
+                logger.error("unexpected where=chat_reconcile model_id=%s error=%s", model_id, e, exc_info=e)
+            body = await self._consul_post_full(
+                path="/api/local_conductor/add_chat_to_model",
+                payload=payload,
+            )
         if not body or body.get("result") != 0:
             return None
         stored_model = await self.db.get_model(model_id)
@@ -486,7 +571,7 @@ class LocalConductor:
                 raise
         return instance
 
-    async def _send_chat_opened(self, *, acct_id: str, chat_id: str, model_id: str | None = None, instance=None) -> bool:
+    async def _send_chat_opened(self, *, acct_id: str, chat_id: str, model_id: str | None = None, instance=None, chat_type: str = "") -> bool:
         if acct_id is None:
             acct_id = ""
         if chat_id is None:
@@ -507,6 +592,14 @@ class LocalConductor:
             text="Chat opened.",
         )
         if ok:
+            if chat_type == "group":
+                await self._notify_group_message_settings(
+                    acct=acct,
+                    token=token,
+                    adapter=adapter,
+                    chat_id=chat_id,
+                    acct_id=acct_id,
+                )
             await self._notify_discord_chat_opened(
                 acct=acct,
                 token=token,
@@ -517,6 +610,36 @@ class LocalConductor:
                 acct_id=acct_id,
             )
         return ok
+
+    async def _notify_group_message_settings(self, *, acct: dict, token: str, adapter, chat_id: str, acct_id: str) -> None:
+        if adapter is None or not adapter.supports("send_message"):
+            return
+        platform = strip_qr_prefix(adapter.acct_type)
+        if not controls_group_messages(platform):
+            return
+        notice = ""
+        if adapter.checks_group_message_settings:
+            try:
+                notice = await adapter.group_message_notice(acct=acct, token=token, chat_id=chat_id)
+            except ExternalError as e:
+                if e.reason == "group_settings_unavailable":
+                    logger.info("group message settings unavailable acct_id=%s chat_id=%s error=%s", acct_id, chat_id, e)
+                else:
+                    logger.warning("group message settings check failed acct_id=%s chat_id=%s error=%s", acct_id, chat_id, e)
+                notice = ensure_group_notice(platform)
+            except Exception as e:
+                logger.error("unexpected where=group_message_settings acct_id=%s chat_id=%s error=%s", acct_id, chat_id, e, exc_info=e)
+                notice = ensure_group_notice(platform)
+        else:
+            notice = ensure_group_notice(platform)
+        if not notice:
+            return
+        await adapter.send_message(
+            acct=acct,
+            token=token,
+            chat_id=chat_id,
+            text=notice,
+        )
 
     async def _notify_discord_chat_opened(self, *, acct: dict, token: str, adapter, chat_id: str, model_id: str | None, instance, acct_id: str) -> None:
         if adapter is None or not adapter.supports("send_discord_voice"):
@@ -636,6 +759,11 @@ class LocalConductor:
         if request_id is None:
             request_id = ""
         request_id = request_id.strip()
+        acct_id = "" if acct_id is None else acct_id.strip()
+        chat_id = "" if chat_id is None else chat_id.strip()
+        if not acct_id or not chat_id:
+            logger.error("acct_id and chat_id are required model_id=%s", model_id)
+            return False
         if request_id:
             dedupe_key = "%s:%s" % (model_id, request_id)
             if await self.db.is_duplicate_request(dedupe_key):
@@ -671,16 +799,33 @@ class LocalConductor:
             if acct:
                 plat = strip_qr_prefix(acct.get("acct_type"))
                 if plat:
+                    platform = plat
                     body["platform"] = plat
+        native_chat_type = body.get("chat_type") or ""
+        if native_chat_type:
+            unified = station_chat_type(platform, native_chat_type)
+            if not unified:
+                logger.info(
+                    "drop unsupported chat type platform=%s chat_type=%s chat_id=%s",
+                    platform,
+                    native_chat_type,
+                    chat_id,
+                )
+                return True
+            body["chat_type"] = unified
         body = instance.rewrite_inbound_attachments(body, chat_id=chat_id, acct_id=acct_id)
         if is_slash_command(text):
             cmd = text.split(None, 1)[0].split("@", 1)[0].lower() if text else ""
             if cmd == "/start":
+                opened_chat_type = body.get("chat_type") or ""
+                if opened_chat_type not in ("group", "private"):
+                    opened_chat_type = ""
                 await self._send_chat_opened(
                     acct_id=acct_id,
                     chat_id=chat_id,
                     model_id=model_id,
                     instance=instance,
+                    chat_type=opened_chat_type,
                 )
             accepted = await instance.handle_command(
                 body,
@@ -1114,7 +1259,7 @@ class LocalConductor:
             updated["access_point"] = "" if ap is None else ap
         if "type" not in updated:
             ptype = stored.get("type")
-            updated["type"] = "token" if ptype is None else ptype
+            updated["type"] = "subscription" if ptype is None else ptype
         if "version" not in updated:
             ver = stored.get("version")
             updated["version"] = 0 if ver is None else ver
@@ -1268,107 +1413,6 @@ class LocalConductor:
             file_bytes=file_bytes,
         )
 
-    async def handle_reply(self, request: web.Request) -> web.Response:
-        unauthorized = self.require_prototype_token(request)
-        if unauthorized is not None:
-            return unauthorized
-
-        method_raw = request.match_info.get("method")
-        method = method_raw.strip() if method_raw is not None else ""
-        chat_id_raw = request.match_info.get("chat_id")
-        chat_id = chat_id_raw.strip() if chat_id_raw is not None else ""
-        request_id_raw = request.match_info.get("request_id")
-        request_id = request_id_raw.strip() if request_id_raw is not None else ""
-        prototype_id_raw = request.match_info.get("prototype_id")
-        if prototype_id_raw is None:
-            prototype_id_raw = ""
-        model_id_raw = request.match_info.get("model_id")
-        model_id = model_id_raw.strip() if model_id_raw is not None else ""
-        prototype_id = ext_path_int("prototype_id", prototype_id_raw)
-        mismatch = self.require_own_prototype(prototype_id)
-        if mismatch is not None:
-            return mismatch
-        if not (method and chat_id and model_id):
-            return err("Invalid path", status=400)
-        if not (await self._prototype_version_ok(request, prototype_id)):
-            return err("Synchronize from consul", status=490)
-
-        try:
-            payload, file_bytes = await self._parse_body_and_file(request)
-        except ExternalError as exc:
-            return err(str(exc), status=400)
-        try:
-            preferred_acct_id = ext_str(payload.get("acct_id"), "acct_id").strip()
-        except ExternalError as exc:
-            return err(str(exc), status=400)
-        acct_id = await self._resolve_reply_acct_id(
-            model_id=model_id,
-            chat_id=chat_id,
-            preferred_acct_id=preferred_acct_id,
-        )
-        if not acct_id:
-            return err("Chat not found", status=404)
-        acct, token, adapter = await self._resolve_local_account_context(acct_id)
-        if not acct:
-            return err("Acct not found", status=404)
-        if not token:
-            return err("Acct token decrypt failed", status=500)
-        payload.pop("acct_id", None)
-        payload.pop("chat_id", None)
-        payload.pop("request_id", None)
-        if method not in {"send_message", *_MEDIA_METHODS}:
-            return err("Unsupported reply method", status=501)
-        return await self._dispatch_platform_method(
-            adapter=adapter,
-            acct=acct,
-            token=token,
-            method=method,
-            chat_id=chat_id,
-            payload=payload,
-            file_bytes=file_bytes,
-        )
-
-    async def _resolve_reply_acct_id(self, *, model_id, chat_id, preferred_acct_id=""):
-        chats = await self.db.list_model_chats(model_id=model_id)
-        acct_id = None
-        preferred = preferred_acct_id.strip() if preferred_acct_id else ""
-        if preferred:
-            for c in chats:
-                cid = c.get("chat_id")
-                if cid is None:
-                    cid = ""
-                aid = c.get("acct_id")
-                if aid is None:
-                    aid = ""
-                if cid == chat_id and aid.strip() == preferred:
-                    return preferred
-            if await self.db.get_local_account(preferred):
-                return preferred
-        model = await self.db.get_model(model_id)
-        primary = ""
-        if model is not None:
-            p = model.get("account_id")
-            if p is None:
-                p = ""
-            primary = p.strip()
-        for c in chats:
-            cid = c.get("chat_id")
-            if cid is None:
-                cid = ""
-            if cid != chat_id:
-                continue
-            cand = c.get("acct_id")
-            if cand is None:
-                cand = ""
-            cand = cand.strip()
-            if not cand:
-                continue
-            if primary and cand == primary:
-                return cand
-            if acct_id is None:
-                acct_id = cand
-        return acct_id
-
     def _read_first_file_bytes(self, files):
         if not files:
             return None
@@ -1386,11 +1430,9 @@ class LocalConductor:
         prototype_id,
         model_id,
         chat_id=None,
-        request_id=None,
         acct_id=None,
         params=None,
         files=None,
-        use_gateway=False,
     ):
         method = method.strip() if method else ""
         model_id = model_id.strip() if model_id else ""
@@ -1407,22 +1449,9 @@ class LocalConductor:
             preferred = str(raw_preferred).strip()
         if acct_id:
             preferred = acct_id.strip()
-        if use_gateway or method in {"send_webrtc", "send_discord_voice", "send_typing", "download_file"}:
-            if not preferred:
-                return False
-            resolved_acct = preferred
-        else:
-            if not chat_id:
-                return False
-            resolved_acct = await self._resolve_reply_acct_id(
-                model_id=model_id,
-                chat_id=chat_id,
-                preferred_acct_id=preferred,
-            )
-            if not resolved_acct:
-                return False
-            if method not in {"send_message", *_MEDIA_METHODS}:
-                return False
+        if not preferred:
+            return False
+        resolved_acct = preferred
         acct, token, adapter = await self._resolve_local_account_context(resolved_acct)
         if not acct or not token:
             return False
@@ -1495,4 +1524,3 @@ def setup_local_conductor_routes(app: web.Application) -> None:
     app.router.add_post("/gateway/list_chats/{prototype_id}/{model_id}", catch_external(lc.handle_gateway_list_chats))
     app.router.add_post("/gateway/list_chats/{prototype_id}/{model_id}/{acct_id}", catch_external(lc.handle_gateway_list_chats))
     app.router.add_post("/gateway/{method}/{chat_id}/{prototype_id}/{model_id}/{acct_id}", catch_external(lc.handle_gateway))
-    app.router.add_post("/reply/{method}/{chat_id}/{request_id}/{prototype_id}/{model_id}", catch_external(lc.handle_reply))

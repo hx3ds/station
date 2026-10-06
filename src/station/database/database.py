@@ -3,6 +3,7 @@ import json
 import time
 import os
 import shutil
+from contextlib import contextmanager
 from station.client.consul import fetch_model
 from station.conductor.db_mixin import LocalConductorDatabaseMixin
 from station.database import AsyncDatabase
@@ -16,6 +17,7 @@ from station.database.file_registry import (
 )
 from station.database.postgres_database import PostgresDatabase
 from station.errors import ExternalError, InternalError
+from station.prototypes.boundary import ext_dict, ext_list
 from station import logger
 
 def _remove_path(path: str) -> None:
@@ -56,12 +58,17 @@ class Database(LocalConductorDatabaseMixin, AsyncDatabase):
         self.enable_local_conductor = enable_local_conductor
         self._init_db()
 
+    @contextmanager
     def _connect(self):
         conn = sqlite3.connect(self.db_path, timeout=60.0)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=60000")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        return conn
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=60000")
+            conn.execute("PRAGMA synchronous=NORMAL")
+            yield conn
+            conn.commit()
+        finally:
+            conn.close()
 
     def _init_db(self):
         try:
@@ -219,8 +226,8 @@ class Database(LocalConductorDatabaseMixin, AsyncDatabase):
                 row = cursor.fetchone()
                 if not row:
                     return None
-                settings = json.loads(row[3]) if row[3] else {}
-                accts = json.loads(row[6]) if row[6] else []
+                settings = ext_dict("model settings", json.loads(row[3])) if row[3] else {}
+                accts = ext_list("model accts", json.loads(row[6])) if row[6] else []
                 return {
                     "model_id": row[0],
                     "prototype_id": row[1],
@@ -269,7 +276,7 @@ class Database(LocalConductorDatabaseMixin, AsyncDatabase):
         name = data.get("name", "")
         token = data.get("token", "")
         access_point = data.get("access_point", "")
-        proto_type = data.get("type", "token")
+        proto_type = data.get("type", "subscription")
         ava = data.get("ava", False)
         version = data.get("version")
         raw_data = json.dumps(data)
@@ -305,7 +312,7 @@ class Database(LocalConductorDatabaseMixin, AsyncDatabase):
                 row = cursor.fetchone()
                 if not row or not row[0]:
                     return None
-                return json.loads(row[0])
+                return ext_dict("prototype raw_data", json.loads(row[0]))
 
         return await run_in_db_executor(_sync)
 
@@ -389,7 +396,7 @@ class Database(LocalConductorDatabaseMixin, AsyncDatabase):
                     "job_id": row["job_id"],
                     "model_id": row["model_id"],
                     "kind": row["kind"],
-                    "payload": json.loads(row["payload"]),
+                    "payload": ext_dict("inbound payload", json.loads(row["payload"])),
                     "created_at": row["created_at"],
                 }
             )
